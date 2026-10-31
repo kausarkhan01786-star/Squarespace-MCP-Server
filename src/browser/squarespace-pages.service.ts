@@ -238,6 +238,144 @@ export class SquarespacePagesService {
     }
   }
 
+  async updatePageTitle(
+    websiteId: string,
+    pageId: string,
+    title: string,
+  ): Promise<{
+    success: true;
+    saved: true;
+    previousPageId: string;
+    page: SquarespacePage;
+    screenshots: { before: string; after: string };
+  }> {
+    const normalizedTitle = title.trim();
+    if (normalizedTitle.length === 0 || normalizedTitle.length > 100) {
+      throw new SquarespaceBrowserError(
+        "PAGE_UPDATE_FAILED",
+        "Page titles must contain between 1 and 100 characters.",
+      );
+    }
+
+    const website = this.browser.getWebsite(websiteId);
+    const initialPages = await this.readWebsitePages(websiteId);
+    const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
+    const target = initialPages[targetIndex];
+    if (!target) {
+      throw new SquarespaceBrowserError(
+        "PAGE_NOT_FOUND",
+        "The requested page ID was not found on this website. Refresh list_pages and use a returned page ID.",
+      );
+    }
+
+    const page = await this.browser.getCurrentPage();
+    await this.waitForPagesPanel(page);
+    const screenshotId = randomUUID();
+    const beforeScreenshot = await this.browser.captureScreenshot(
+      `update-page-title-before-${screenshotId}.png`,
+    );
+    const afterScreenshotName = `update-page-title-after-${screenshotId}.png`;
+    const expandedFolderKeys: string[] = [];
+    let updateAttempted = false;
+    let afterScreenshotAttempted = false;
+
+    try {
+      await this.expandCollapsedFolders(page, expandedFolderKeys);
+      const currentItems = await this.readPanelItems(page);
+      const targetKey = pageItemKeys(currentItems)[targetIndex];
+      const expectedKey = JSON.stringify({
+        group: target.groupLabel,
+        path: [...target.parentPath, target.navigationTitle],
+      });
+      if (!currentItems[targetIndex] || targetKey !== expectedKey) {
+        throw new SquarespaceBrowserError(
+          "PAGE_NOT_FOUND",
+          "The selected page no longer matches its ID in the Pages panel. Refresh list_pages and retry.",
+        );
+      }
+
+      const row = page.locator(PAGE_ITEM_SELECTOR).nth(targetIndex);
+      await row.locator('button[aria-label^="Page settings "]').click();
+      const dialog = page.locator('[role="dialog"]').last();
+      await dialog.waitFor({ state: "visible", timeout: this.timeoutMs });
+      const titleField = dialog.getByRole("textbox", { name: "Page Title" });
+      if ((await titleField.count()) !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_UPDATE_FAILED",
+          "The selected page did not expose the observed Page Title field.",
+        );
+      }
+
+      updateAttempted = true;
+      await titleField.fill(normalizedTitle);
+      await titleField.press("Tab");
+      await dialog.getByRole("button", { name: "Close", exact: true }).click();
+      await dialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
+
+      const savedSettings = await this.readPageSettings(page, row, target.type);
+      if (savedSettings.pageTitle !== normalizedTitle) {
+        throw new SquarespaceBrowserError(
+          "PAGE_UPDATE_FAILED",
+          "Squarespace did not confirm that the requested page title was saved.",
+        );
+      }
+
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+      expandedFolderKeys.length = 0;
+
+      const updatedPages = await this.readWebsitePages(websiteId);
+      const matchingPages = updatedPages.filter(
+        (candidate) =>
+          candidate.name === normalizedTitle &&
+          candidate.groupLabel === target.groupLabel &&
+          candidate.parentPath.length === target.parentPath.length &&
+          candidate.parentPath.every(
+            (segment, index) => segment === target.parentPath[index],
+          ),
+      );
+      if (matchingPages.length !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_UPDATE_FAILED",
+          "Squarespace settings showed the new title, but the updated page could not be identified unambiguously in the Pages panel.",
+        );
+      }
+
+      afterScreenshotAttempted = true;
+      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      return {
+        success: true,
+        saved: true,
+        previousPageId: pageId,
+        page: matchingPages[0]!,
+        screenshots: { before: beforeScreenshot, after: afterScreenshot },
+      };
+    } catch (error) {
+      if (updateAttempted && !afterScreenshotAttempted) {
+        afterScreenshotAttempted = true;
+        try {
+          await this.browser.captureScreenshot(afterScreenshotName);
+        } catch (screenshotError) {
+          throw new SquarespaceBrowserError(
+            "SCREENSHOT_FAILED",
+            "The title update was not confirmed, and the post-operation screenshot also failed.",
+            { cause: new AggregateError([error, screenshotError]) },
+          );
+        }
+      }
+
+      if (error instanceof SquarespaceBrowserError) {
+        throw error;
+      }
+      throw new SquarespaceBrowserError(
+        "PAGE_UPDATE_FAILED",
+        "Squarespace did not confirm that the requested page title was updated and saved.",
+        { cause: error },
+      );
+    } finally {
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+    }
+  }
+
   async listPages(
     websiteId: string,
     group?: NavigationGroup,

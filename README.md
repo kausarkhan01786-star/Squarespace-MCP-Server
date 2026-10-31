@@ -146,14 +146,19 @@ collapsed folder states are restored afterward.
 
 ### Page creation
 
-`create_page` is the first page-writing tool. It creates a blank `page` or
+`create_page` creates a blank `page` or
 `blog` in Main Navigation, Footer Navigation, or Not Linked. The page title
 and navigation title are set through the visible page-settings dialog. The
 tool captures before/after screenshots in the persistent profile's
 `screenshots` directory and returns their paths. It reports success only after
 reopening settings and confirming both titles persisted; it does not invoke a
-publish action. Template-based pages, folders, and the remaining management
-operations are not implemented yet.
+publish action. Template-based pages and folders are not supported yet.
+
+`update_page_title` changes only the Page Title field (not the Navigation Title
+field), captures before/after screenshots, and reports success only after
+reopening settings and confirming the new title. Use the returned `page` record
+for subsequent operations because page identifiers are derived from the
+observed Pages-panel path.
 
 The creation flow was inspected in the live Pages panel. It uses the observed
 group-specific “Add a new page” controls (whose accessible titles differ

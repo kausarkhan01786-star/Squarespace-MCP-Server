@@ -315,6 +315,45 @@ test("does not report success when the requested title does not persist", async 
   }
 });
 
+test("updates a page title and returns the verified page record", async () => {
+  const { browser, pages, screenshots } = await createPageFixture();
+  try {
+    const initialPages = await pages.listPages(website.id);
+    const existing = initialPages.find((record) => record.name === "Existing");
+    assert.ok(existing);
+
+    const result = await pages.updatePageTitle(website.id, existing.id, "Renamed");
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.previousPageId, existing.id);
+    assert.equal(result.page.name, "Renamed");
+    assert.equal(result.page.navigationTitle, "Existing");
+    assert.notEqual(result.page.id, existing.id);
+    assert.equal(screenshots.length, 2);
+    assert.match(result.screenshots.before, /^update-page-title-before-.*\.png$/);
+    assert.match(result.screenshots.after, /^update-page-title-after-.*\.png$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("does not report an unsaved page-title update as successful", async () => {
+  const { browser, pages, screenshots } = await createPageFixture(false);
+  try {
+    const initialPages = await pages.listPages(website.id);
+    const existing = initialPages.find((record) => record.name === "Existing");
+    assert.ok(existing);
+
+    await assert.rejects(
+      () => pages.updatePageTitle(website.id, existing.id, "Unsaved"),
+      { code: "PAGE_UPDATE_FAILED" },
+    );
+    assert.equal(screenshots.length, 2);
+  } finally {
+    await browser.close();
+  }
+});
+
 test("inspects Squarespace section records using the observed data-test selector", async () => {
   const { browser, page, pages } = await createFixture();
   try {
@@ -390,6 +429,7 @@ async function createPageFixture(
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   const screenshots: string[] = [];
+  let initialized = false;
   const pages = new SquarespacePagesService(
     {
       async listWebsites() {
@@ -405,7 +445,10 @@ async function createPageFixture(
         if (websiteId !== website.id) {
           throw new Error("Unknown fixture website.");
         }
-        await page.setContent(createPageHtml(persistTitles, groupLabel));
+        if (!initialized) {
+          await page.setContent(createPageHtml(persistTitles, groupLabel));
+          initialized = true;
+        }
       },
       async openWebsiteUrl(websiteId: string) {
         if (websiteId !== website.id) {

@@ -50,14 +50,20 @@ test("registers page tools with correct annotations and returns structured JSON"
         "list_not_linked_pages",
         "list_pages",
         "list_websites",
+        "update_page_title",
       ],
     );
     const createPageTool = listedTools.tools.find((tool) => tool.name === "create_page");
     assert.equal(createPageTool?.annotations?.readOnlyHint, false);
     assert.equal(createPageTool?.annotations?.destructiveHint, false);
+    const updateTitleTool = listedTools.tools.find(
+      (tool) => tool.name === "update_page_title",
+    );
+    assert.equal(updateTitleTool?.annotations?.readOnlyHint, false);
+    assert.equal(updateTitleTool?.annotations?.idempotentHint, true);
     assert.ok(
       listedTools.tools
-        .filter((tool) => tool.name !== "create_page")
+        .filter((tool) => !["create_page", "update_page_title"].includes(tool.name))
         .every((tool) => tool.annotations?.readOnlyHint === true),
     );
 
@@ -71,6 +77,15 @@ test("registers page tools with correct annotations and returns structured JSON"
       },
     });
     assert.equal(invalidCreateRequest.isError, true);
+    const invalidUpdateRequest = await client.callTool({
+      name: "update_page_title",
+      arguments: {
+        website_id: "site-1",
+        page_id: "page-1",
+        title: " ",
+      },
+    });
+    assert.equal(invalidUpdateRequest.isError, true);
 
     const result = await client.callTool({ name: "list_websites", arguments: {} });
     assert.deepEqual(result.structuredContent, { result: [website] });

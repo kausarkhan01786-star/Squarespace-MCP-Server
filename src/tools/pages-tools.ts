@@ -20,6 +20,9 @@ const createPageSchema = websiteIdSchema.extend({
     .enum(["main_navigation", "not_linked", "footer_navigation"])
     .describe("Navigation group where the page should be created."),
 });
+const updatePageTitleSchema = pageInputSchema.extend({
+  title: z.string().trim().min(1).max(100).describe("New page title."),
+});
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -30,6 +33,12 @@ const pageCreationAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: false,
+  openWorldHint: false,
+} as const;
+const pageUpdateAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
   openWorldHint: false,
 } as const;
 
@@ -60,6 +69,20 @@ export function registerPagesTools(
       runTool("create_page", () =>
         pages.createPage(website_id, title, page_type, navigation_group),
       ),
+  );
+
+  server.registerTool(
+      "update_page_title",
+      {
+        description: "Update and verify a Squarespace page title without changing its navigation title or invoking publish.",
+        inputSchema: updatePageTitleSchema,
+        outputSchema,
+        annotations: pageUpdateAnnotations,
+      },
+      async ({ website_id, page_id, title }) =>
+        runTool("update_page_title", () =>
+          pages.updatePageTitle(website_id, page_id, title),
+        ),
   );
 
   server.registerTool(
