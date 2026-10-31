@@ -99,12 +99,12 @@ query strings and fragments and does not return input values. Screenshots are
 saved within the profile's `screenshots` directory.
 
 This service can navigate, inspect pages, switch among listed websites, and
-capture screenshots. Page-writing behavior is exposed separately through
-explicit MCP tools.
+capture screenshots. Screenshots are saved to the local profile's
+`screenshots` directory by the browser service.
 
 ## Pages tools
 
-The MCP server registers these read-only inspection tools:
+The MCP server registers only read-only inspection tools:
 
 - `list_websites` — list sites available in the manually authenticated account.
 - `list_pages` — return page IDs, names, page/folder types, URLs, navigation
@@ -116,12 +116,41 @@ The MCP server registers these read-only inspection tools:
 - `list_not_linked_pages` — list pages in the Not Linked group.
 - `inspect_page_sections` — inspect visible headings and text in a page's
   rendered sections.
+- `list_page_sections` — list observed section IDs, themes, layout markers,
+  headings, and block IDs/types for a page.
+- `inspect_section` — inspect one section returned by `list_page_sections`.
+- `inspect_mobile_responsive` — compare section widths and horizontal overflow
+  at the current browser width and a 390x844 viewport, restoring the original
+  viewport afterward.
+- `create_page_snapshot` — save a local JSON snapshot plus a full-page
+  screenshot and individual section screenshots where Squarespace exposes
+  them.
+- `list_snapshots` — list local snapshots and captured screenshot counts.
+- `get_snapshot` — read a validated snapshot by UUID.
+- `inspect_design_settings` — open the observed Site Styles screen and report an
+  explicit error if it does not expose inspectable controls.
+- `inspect_site_styles` — check whether the visible Site Styles controls are
+  available; it does not save settings.
+- `inspect_typography` — read computed font styles on visible page headings and
+  text; this is not a site-wide font preset catalog.
+- `inspect_color_themes` — read observed section theme IDs and computed
+  rendered colors; this is not the full palette editor.
+- `inspect_button_styles` — inspect computed styles on visible semantic
+  buttons; it does not infer button presets or styled links.
+- `inspect_section_settings` — read a rendered section's theme, layout,
+  dimensions, and computed styles.
+- `list_content_blocks` and `inspect_content_block` — list rendered block IDs,
+  raw block type identifiers, observed definition names, and visible text.
+- `get_block_edit_schema` — return an explicit error unless a verified block
+  editing form is available.
+- `list_available_block_types` — list types seen on the selected page, marked
+  incomplete because this is not the add-block catalog.
 
 Call `list_websites` first, then pass the returned `website_id` to page tools.
-Use page IDs returned from `list_pages` for `get_page_details`,
-`get_page_url`, and `inspect_page_sections`. Results are returned as
-structured JSON. If the persistent browser profile is not authenticated, the
-visible browser opens and the account owner must complete sign-in manually.
+Use page IDs returned from `list_pages` for page and section inspection.
+Results are returned as structured JSON. If the persistent browser profile is
+not authenticated, the visible browser opens and the account owner must
+complete sign-in manually.
 
 The inspection service uses DOM markers observed in the Squarespace interface:
 `[data-test="websiteCard"]`, `[data-test="pages-panel"]`,
@@ -133,62 +162,132 @@ initially collapsed. Section inspection uses the observed
 changes these markers or the panel does not load, tools return an explicit
 error instead of silently returning an incomplete result.
 
+The design/content inspection tools report only visible DOM data and raw
+Squarespace block-type identifiers; those identifiers are not treated as
+stable semantic block types. On the inspected Kausar Home page, Squarespace
+reported raw block type `1337` with observed definition names
+`website.components.imageFluid`, `website.components.html`,
+`website.components.code`, and `website.components.embed`. The type number is
+preserved verbatim and the definition names describe only blocks present on
+that page. Mobile inspection resizes the browser viewport temporarily and
+does not save or publish content.
+
+The project browser opened the observed Site Styles control and reached
+`/config/site-styles`. After the loading indicator cleared, the panel contained
+only its heading and no typography, color, button, form, or spacing controls.
+The settings tools therefore return an explicit error rather than inventing
+site-wide values. Rendered typography, section colors, and semantic button
+styles are available separately with their scope clearly marked. The observed
+page preview toolbar exposed `Edit` and `Toggle Site Styles editing`; block edit
+forms and the section/block add, duplicate, reorder, and delete catalogs were
+not verified. Their mutation tools are not registered. An internal mutation
+guard schema is prepared for future work and requires a pre-change snapshot ID
+plus explicit confirmation. Operation-specific mutation methods and input
+schemas remain deferred until their live editor controls and save behavior are
+verified.
+
+Backups are stored under the project-local `backups/` directory, which is
+git-ignored:
+
+```text
+backups/
+  snapshots/<snapshot-uuid>.json
+  screenshots/<snapshot-uuid>-page.png
+  screenshots/<snapshot-uuid>-section-<index>-<section-id>.png
+```
+
+Call `create_page_snapshot` with `website_id` and `page_id` to inspect the page
+and save its JSON plus screenshots:
+
+```json
+{
+  "website_id": "ID returned by list_websites",
+  "page_id": "ID returned by list_pages"
+}
+```
+
+The tool returns the generated `snapshotId` and screenshot paths. Use
+`list_snapshots` to find local backups and `get_snapshot` with a returned
+`snapshot_id` to retrieve one. The JSON includes snapshot ID/time,
+credential-free website and page URLs, page metadata, section IDs, visible
+headings/text, observed layout/theme values, block IDs/types/text, and
+screenshot metadata associating every image with the snapshot, website, page,
+and (for section images) section ID. A section image is explicitly marked
+`unavailable` if Squarespace will not expose that section for capture. Images
+are PNGs captured from the public page frame, not the authenticated dashboard.
+
+The snapshot writer removes URL query strings/fragments and redacts bearer/JWT
+strings, credential-like values, email addresses, and phone numbers from saved
+text. Screenshots mask any section whose inspected text requires redaction.
+Other text or content embedded in images cannot be reliably classified;
+review local backups before sharing them. Backups are inspection records and
+screenshots, not a restorable Squarespace export. UUID filenames and exclusive
+file creation prevent accidental overwrite. `list_snapshots` returns local
+metadata; `get_snapshot` validates and returns a saved JSON snapshot.
+
+Block-specific editing, section mutations, Custom CSS, Custom Code, and
+header/footer customization are not available as MCP tools. Page
+create/update/move/delete and save/publish
+operations are also intentionally not registered. Local snapshot creation
+writes only under `backups/`; no registered tool can modify, delete, save, or
+publish website content. Mutating methods retained internally in the browser
+service are not reachable through MCP registration.
+
 Page types are reported conservatively as `folder` or `page`, based on the
 observed folder controls. A page's enabled/disabled status is `unknown` when
 Squarespace does not expose an Enable Page checkbox for that item. Navigation
 group and enabled status are separate properties: a Not Linked page can still
 be enabled.
 
-Inspection tools are marked read-only and do not create, edit, delete, save, or
-publish website content. Opening and closing page settings and temporarily
-expanding folders are used only to inspect existing page data; original
-collapsed folder states are restored afterward.
+Opening and closing page settings and temporarily expanding folders are used
+only to inspect existing page data; original collapsed folder states are
+restored afterward.
 
-### Page creation
+## Navigation, SEO, and website settings
 
-`create_page` creates a blank `page` or
-`blog` in Main Navigation, Footer Navigation, or Not Linked. The page title
-and navigation title are set through the visible page-settings dialog. The
-tool captures before/after screenshots in the persistent profile's
-`screenshots` directory and returns their paths. It reports success only after
-reopening settings and confirming both titles persisted; it does not invoke a
-publish action. Template-based pages and folders are not supported yet.
+The navigation/SEO/settings tools are read-only and use the persistent
+authenticated browser profile:
 
-`update_page_title` changes only the Page Title field (not the Navigation Title
-field), captures before/after screenshots, and reports success only after
-reopening settings and confirming the new title. Use the returned `page` record
-for subsequent operations because page identifiers are derived from the
-observed Pages-panel path.
+- `list_main_navigation`, `list_footer_navigation`, and
+  `list_not_linked_pages` return the observed Pages-panel groups.
+- `inspect_navigation_item` reports the page/folder record, parent hierarchy,
+  and sibling order.
+- `inspect_navigation_links` reads rendered `nav` and `footer` links from the
+  selected page (or the homepage when `page_id` is omitted). The Pages-panel
+  tree remains the source of hierarchy and configured ordering.
+- `inspect_page_seo`, `get_page_meta_title`, and
+  `get_page_meta_description` distinguish page SEO form values, website Search
+  Appearance values, and metadata read from rendered HTML.
+- `inspect_page_slug` and `inspect_page_indexing_settings` read the visible
+  page slug and Hide Page from Search Results controls.
+- `inspect_social_sharing_settings` checks the visible site/page upload controls
+  and, when `page_id` is supplied, rendered social metadata.
+- `inspect_website_settings`, `inspect_domain_settings`,
+  `inspect_site_information`, `inspect_favicon`, `inspect_social_links`,
+  `inspect_language_settings`, and `inspect_timezone_settings` inspect only
+  the corresponding visible Squarespace settings UI or the website listing.
 
-`update_page_url` accepts a single URL-slug segment, not a full URL; it
-normalizes the slug to lowercase and verifies both the saved setting and
-resulting site URL. Squarespace's homepage has a fixed root URL and is rejected.
+On the inspected Kausar site, the page SEO panel exposed optional SEO title and
+description fields plus the Hide Page from Search Results checkbox for a
+non-homepage page. The homepage panel directs to the website Search Appearance
+screen instead; its title format and site description are read there.
+Rendered `<title>`, description, canonical, robots, Open Graph, and Twitter
+metadata are returned separately and are not represented as saved settings.
 
-`duplicate_page` uses the observed Duplicate Page control, then verifies that a
-unique copy appears in the Pages panel before reporting success. It also
-captures and returns before/after screenshots. Folder duplication is rejected;
-other page types are supported when their settings dialog exposes the same
-duplicate control.
+The Website settings screen exposed language/region, regional/timezone,
+favicon, social links, and social sharing controls. The inspected Regional
+Settings exposed country and timezone values. Site Languages showed its
+setting label but no selected language value in the DOM. Favicon and social
+sharing screens exposed upload controls but not current image file details.
+Social-link inspection omits `mailto:` links and email addresses. The Domains
+& Email screen exposed setup/manage cards but no configured domain records;
+`inspect_domain_settings` marks those records unavailable. Site information is
+limited to the name and URL returned by the authenticated website listing and
+does not include owner, billing, or account-profile data.
 
-`move_page` moves a page to Main Navigation, Footer Navigation, Not Linked, or
-an existing folder in the selected group. It captures before/after screenshots
-and verifies the page's resulting group and parent path before reporting
-success. Use the current page and folder IDs returned by `list_pages`; IDs
-change when a page's group or parent path changes. Moving folders and reordering
-within the same location are not supported. The drag-and-drop flow is covered
-by Playwright fixtures for group and folder destinations; it has not been
-executed against a live website.
-
-`delete_page` and `save_page_changes` are not implemented yet.
-
-The creation flow was inspected in the live Pages panel. It uses the observed
-group-specific “Add a new page” controls (whose accessible titles differ
-slightly between Main Navigation and Not Linked),
-`[data-test="catalog-dialog"]`, `[data-test="add-blank-options-button"]`, and
-the blank Page/Blog options. Footer Navigation is used only when Squarespace
-exposes an unambiguous add control containing that exact group label. If these
-controls change or the resulting page cannot be uniquely identified and
-verified, the tool returns an explicit error rather than claiming success.
+Reading settings opens the relevant existing panel and closes it without
+saving. These tools do not change navigation, page SEO, domains, language,
+timezone, favicon, social links, or any other live Squarespace content.
 
 ## Development
 

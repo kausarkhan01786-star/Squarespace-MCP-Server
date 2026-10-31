@@ -1,118 +1,33 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import { PageBackupService } from "../backups/page-backup.service.js";
 import { SquarespacePagesService } from "../browser/squarespace-pages.service.js";
+import {
+  outputSchema,
+  readOnlyAnnotations,
+  runTool,
+} from "./tool-helpers.js";
 
-const outputSchema = z.object({ result: z.unknown() });
 const websiteIdSchema = z.object({
   website_id: z.string().trim().min(1).describe("ID returned by list_websites."),
 });
 const pageInputSchema = websiteIdSchema.extend({
   page_id: z.string().trim().min(1).describe("ID returned by list_pages."),
 });
+const sectionInputSchema = pageInputSchema.extend({
+  section_id: z.string().trim().min(1).describe("Section ID returned by list_page_sections."),
+});
+const snapshotInputSchema = pageInputSchema;
+const snapshotIdSchema = z.object({
+  snapshot_id: z.string().uuid().describe("Snapshot UUID returned by create_page_snapshot or list_snapshots."),
+});
 const listPagesSchema = websiteIdSchema.extend({
   group: z.enum(["main_navigation", "footer_navigation", "not_linked", "other"]).optional(),
 });
-const createPageSchema = websiteIdSchema.extend({
-  title: z.string().trim().min(1).max(100).describe("Title for the new page."),
-  page_type: z.enum(["page", "blog"]).describe("Blank Squarespace page type to create."),
-  navigation_group: z
-    .enum(["main_navigation", "not_linked", "footer_navigation"])
-    .describe("Navigation group where the page should be created."),
-});
-const updatePageTitleSchema = pageInputSchema.extend({
-  title: z.string().trim().min(1).max(100).describe("New page title."),
-});
-const updatePageUrlSchema = pageInputSchema.extend({
-  url_slug: z
-    .string()
-    .trim()
-    .min(1)
-    .max(100)
-    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/)
-    .describe("New single-segment URL slug; do not include a domain or path separators."),
-});
-const movePageSchema = pageInputSchema.extend({
-  destination_group: z
-    .enum(["main_navigation", "footer_navigation", "not_linked"])
-    .describe("Navigation group where the page should be moved."),
-  destination_folder_id: z
-    .string()
-    .trim()
-    .min(1)
-    .optional()
-    .describe("Optional folder ID in the destination group."),
-});
-const deletePageSchema = pageInputSchema.extend({
-  confirmation: z
-    .literal("DELETE")
-    .describe("Explicit confirmation required before deleting a page."),
-});
-const savePageChangesSchema = websiteIdSchema.extend({
-  publish: z
-    .boolean()
-    .optional()
-    .default(false)
-    .describe("Whether to publish the saved changes to the live site."),
-  confirmation: z
-    .literal("PUBLISH")
-    .optional()
-    .describe("Required when publish is true."),
-}).superRefine((value, context) => {
-  if (value.publish && value.confirmation !== "PUBLISH") {
-    context.addIssue({
-      code: "custom",
-      path: ["confirmation"],
-      message: "Publishing changes requires confirmation: PUBLISH.",
-    });
-  }
-});
-const readOnlyAnnotations = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-} as const;
-const pageCreationAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: false,
-  openWorldHint: false,
-} as const;
-const pageDuplicationAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: false,
-  openWorldHint: false,
-} as const;
-const pageMoveAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: false,
-  openWorldHint: false,
-} as const;
-const pageUpdateAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-} as const;
-const pageDeleteAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: true,
-  idempotentHint: false,
-  openWorldHint: false,
-} as const;
-const pageSaveAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: false,
-  openWorldHint: false,
-} as const;
-
 export function registerPagesTools(
   server: McpServer,
   pages: SquarespacePagesService,
+  backups: PageBackupService,
 ): void {
   server.registerTool(
     "list_websites",
@@ -126,106 +41,40 @@ export function registerPagesTools(
   );
 
   server.registerTool(
-    "create_page",
+    "create_page_snapshot",
     {
-      description: "Create a blank Squarespace Page or Blog in a selected navigation group. Does not invoke a publish action.",
-      inputSchema: createPageSchema,
+      description: "Save a local JSON snapshot of the inspected page and capture a full-page screenshot plus individual section screenshots where available. Does not modify or publish the Squarespace website.",
+      inputSchema: snapshotInputSchema,
       outputSchema,
-      annotations: pageCreationAnnotations,
-    },
-    async ({ website_id, title, page_type, navigation_group }) =>
-      runTool("create_page", () =>
-        pages.createPage(website_id, title, page_type, navigation_group),
-      ),
-  );
-
-  server.registerTool(
-    "duplicate_page",
-    {
-      description: "Duplicate a Squarespace page using its visible Page Settings control and verify the copy appears.",
-      inputSchema: pageInputSchema,
-      outputSchema,
-      annotations: pageDuplicationAnnotations,
+      annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("duplicate_page", () =>
-        pages.duplicatePage(website_id, page_id),
+      runTool("create_page_snapshot", () =>
+        backups.createPageSnapshot(website_id, page_id),
       ),
   );
 
   server.registerTool(
-    "move_page",
+    "list_snapshots",
     {
-      description: "Move a Squarespace page to a navigation group or folder using the visible Pages-panel drag-and-drop controls.",
-      inputSchema: movePageSchema,
+      description: "List locally saved page snapshots and their captured screenshot counts.",
+      inputSchema: z.object({}),
       outputSchema,
-      annotations: pageMoveAnnotations,
+      annotations: readOnlyAnnotations,
     },
-    async ({ website_id, page_id, destination_group, destination_folder_id }) =>
-      runTool("move_page", () =>
-        pages.movePage(
-          website_id,
-          page_id,
-          destination_group,
-          destination_folder_id,
-        ),
-      ),
+    async () => runTool("list_snapshots", () => backups.listSnapshots()),
   );
 
   server.registerTool(
-    "delete_page",
+    "get_snapshot",
     {
-      description: "Delete a non-homepage Squarespace page after explicit DELETE confirmation, then verify it was removed.",
-      inputSchema: deletePageSchema,
+      description: "Read a validated local page snapshot by UUID.",
+      inputSchema: snapshotIdSchema,
       outputSchema,
-      annotations: pageDeleteAnnotations,
+      annotations: readOnlyAnnotations,
     },
-    async ({ website_id, page_id, confirmation }) =>
-      runTool("delete_page", () =>
-        pages.deletePage(website_id, page_id, confirmation),
-      ),
-  );
-
-  server.registerTool(
-    "save_page_changes",
-    {
-      description: "Save the currently open Squarespace editor changes, or publish them after explicit PUBLISH confirmation, then verify visible Squarespace confirmation.",
-      inputSchema: savePageChangesSchema,
-      outputSchema,
-      annotations: pageSaveAnnotations,
-    },
-    async ({ website_id, publish, confirmation }) =>
-      runTool("save_page_changes", () =>
-        pages.savePageChanges(website_id, publish, confirmation),
-      ),
-  );
-
-  server.registerTool(
-    "update_page_title",
-    {
-      description: "Update and verify a Squarespace page title without changing its navigation title or invoking publish.",
-      inputSchema: updatePageTitleSchema,
-      outputSchema,
-      annotations: pageUpdateAnnotations,
-    },
-    async ({ website_id, page_id, title }) =>
-      runTool("update_page_title", () =>
-        pages.updatePageTitle(website_id, page_id, title),
-      ),
-  );
-
-  server.registerTool(
-    "update_page_url",
-    {
-      description: "Update and verify a page's URL Slug. The Squarespace homepage's fixed root URL cannot be changed.",
-      inputSchema: updatePageUrlSchema,
-      outputSchema,
-      annotations: pageUpdateAnnotations,
-    },
-    async ({ website_id, page_id, url_slug }) =>
-      runTool("update_page_url", () =>
-        pages.updatePageUrl(website_id, page_id, url_slug),
-      ),
+    async ({ snapshot_id }) =>
+      runTool("get_snapshot", () => backups.getSnapshot(snapshot_id)),
   );
 
   server.registerTool(
@@ -297,6 +146,48 @@ export function registerPagesTools(
   );
 
   server.registerTool(
+    "list_page_sections",
+    {
+      description: "List visible section IDs, themes, layouts, headings, and observed block identifiers for one page.",
+      inputSchema: pageInputSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, page_id }) =>
+      runTool("list_page_sections", () =>
+        pages.listPageSections(website_id, page_id),
+      ),
+  );
+
+  server.registerTool(
+    "inspect_section",
+    {
+      description: "Inspect one visible Squarespace section and its observed blocks without editing or publishing it.",
+      inputSchema: sectionInputSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, page_id, section_id }) =>
+      runTool("inspect_section", () =>
+        pages.inspectSection(website_id, page_id, section_id),
+      ),
+  );
+
+  server.registerTool(
+    "inspect_mobile_responsive",
+    {
+      description: "Compare rendered section widths and horizontal overflow at the current desktop size and a 390x844 mobile viewport.",
+      inputSchema: pageInputSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, page_id }) =>
+      runTool("inspect_mobile_responsive", () =>
+        pages.inspectMobileResponsive(website_id, page_id),
+      ),
+  );
+
+  server.registerTool(
     "inspect_page_sections",
     {
       description: "Inspect visible content sections on one Squarespace page without editing or publishing it.",
@@ -309,33 +200,4 @@ export function registerPagesTools(
         pages.inspectPageSections(website_id, page_id),
       ),
   );
-}
-
-async function runTool(
-  toolName: string,
-  action: () => Promise<unknown>,
-): Promise<{
-  content: Array<{ type: "text"; text: string }>;
-  structuredContent?: { result: unknown };
-  isError?: boolean;
-}> {
-  try {
-    const result = await action();
-    return {
-      content: [{ type: "text", text: JSON.stringify({ result }) }],
-      structuredContent: { result },
-    };
-  } catch (error) {
-    const detail = error instanceof SquarespaceBrowserError
-      ? { code: error.code, message: error.message }
-      : {
-          code: "UNEXPECTED_ERROR",
-          message: error instanceof Error ? error.message : "The tool failed for an unknown reason.",
-        };
-    console.error(`[${toolName}] ${detail.code}: ${detail.message}`);
-    return {
-      isError: true,
-      content: [{ type: "text", text: JSON.stringify({ error: detail }) }],
-    };
-  }
 }

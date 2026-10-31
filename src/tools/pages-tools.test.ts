@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { PageBackupService } from "../backups/page-backup.service.js";
 import { SquarespacePagesService } from "../browser/squarespace-pages.service.js";
 import type { WebsiteSummary } from "../browser/squarespace-browser.service.js";
 import { registerPagesTools } from "./pages-tools.js";
@@ -29,10 +30,19 @@ test("registers page tools with correct annotations and returns structured JSON"
       return "fixture-screenshot.png";
     },
   });
+  const backups = new PageBackupService(pages, {
+    getWebsite() {
+      return website;
+    },
+    async openWebsiteUrl() {},
+    async getCurrentPage() {
+      throw new Error("Page access is not expected in this registration test.");
+    },
+  }, { backupDirectory: "C:\\temp\\squarespace-test-backups" });
   const server = new McpServer({ name: "tool-registry-test", version: "1.0.0" });
   const client = new Client({ name: "tool-registry-test-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  registerPagesTools(server, pages);
+  registerPagesTools(server, pages, backups);
 
   try {
     await server.connect(serverTransport);
@@ -42,111 +52,69 @@ test("registers page tools with correct annotations and returns structured JSON"
     assert.deepEqual(
       listedTools.tools.map((tool) => tool.name).sort(),
       [
-        "create_page",
-        "delete_page",
-        "duplicate_page",
+        "create_page_snapshot",
         "get_navigation_structure",
         "get_page_details",
         "get_page_url",
+        "get_snapshot",
+        "inspect_mobile_responsive",
         "inspect_page_sections",
+        "inspect_section",
         "list_not_linked_pages",
+        "list_page_sections",
         "list_pages",
+        "list_snapshots",
         "list_websites",
-        "move_page",
-        "save_page_changes",
-        "update_page_title",
-        "update_page_url",
       ],
     );
-    const createPageTool = listedTools.tools.find((tool) => tool.name === "create_page");
-    assert.equal(createPageTool?.annotations?.readOnlyHint, false);
-    assert.equal(createPageTool?.annotations?.destructiveHint, false);
-    const duplicatePageTool = listedTools.tools.find(
-      (tool) => tool.name === "duplicate_page",
-    );
-    assert.equal(duplicatePageTool?.annotations?.readOnlyHint, false);
-    assert.equal(duplicatePageTool?.annotations?.destructiveHint, false);
-    const movePageTool = listedTools.tools.find((tool) => tool.name === "move_page");
-    assert.equal(movePageTool?.annotations?.readOnlyHint, false);
-    assert.equal(movePageTool?.annotations?.destructiveHint, false);
-    const deletePageTool = listedTools.tools.find((tool) => tool.name === "delete_page");
-    assert.equal(deletePageTool?.annotations?.readOnlyHint, false);
-    assert.equal(deletePageTool?.annotations?.destructiveHint, true);
-    const savePageChangesTool = listedTools.tools.find(
-      (tool) => tool.name === "save_page_changes",
-    );
-    assert.equal(savePageChangesTool?.annotations?.readOnlyHint, false);
-    assert.equal(savePageChangesTool?.annotations?.destructiveHint, false);
-    const updateTitleTool = listedTools.tools.find(
-      (tool) => tool.name === "update_page_title",
-    );
-    assert.equal(updateTitleTool?.annotations?.readOnlyHint, false);
-    assert.equal(updateTitleTool?.annotations?.idempotentHint, true);
-    const updateUrlTool = listedTools.tools.find((tool) => tool.name === "update_page_url");
-    assert.equal(updateUrlTool?.annotations?.readOnlyHint, false);
-    assert.equal(updateUrlTool?.annotations?.idempotentHint, true);
-    assert.ok(
-      listedTools.tools
-        .filter(
-          (tool) =>
-            ![
-              "create_page",
-              "delete_page",
-              "duplicate_page",
-              "move_page",
-              "save_page_changes",
-              "update_page_title",
-              "update_page_url",
-            ].includes(tool.name),
-        )
-        .every((tool) => tool.annotations?.readOnlyHint === true),
-    );
+    assert.ok(listedTools.tools.every((tool) => tool.annotations?.readOnlyHint === true));
+    const disabledMutationTools = [
+      "create_page",
+      "delete_page",
+      "duplicate_page",
+      "move_page",
+      "save_page_changes",
+      "update_page_title",
+      "update_page_url",
+      "add_content_section",
+      "update_text_block",
+      "update_image_block",
+      "update_button_block",
+      "update_section_background",
+      "update_section_spacing",
+      "update_section_layout",
+      "reorder_sections",
+      "remove_section",
+      "manage_custom_css",
+      "manage_custom_code_injection",
+      "customize_header",
+      "customize_footer",
+    ];
+    for (const name of disabledMutationTools) {
+      assert.equal(
+        listedTools.tools.some((tool) => tool.name === name),
+        false,
+        `${name} must not be registered as an MCP tool`,
+      );
+      const result = await client.callTool({ name, arguments: {} });
+      assert.equal(result.isError, true, `${name} must be rejected by the MCP server`);
+    }
 
-    const invalidCreateRequest = await client.callTool({
-      name: "create_page",
-      arguments: {
-        website_id: "site-1",
-        title: " ",
-        page_type: "folder",
-        navigation_group: "main_navigation",
-      },
-    });
-    assert.equal(invalidCreateRequest.isError, true);
-    const invalidUpdateRequest = await client.callTool({
-      name: "update_page_title",
+    const invalidSectionRequest = await client.callTool({
+      name: "inspect_section",
       arguments: {
         website_id: "site-1",
         page_id: "page-1",
-        title: " ",
+        section_id: " ",
       },
     });
-    assert.equal(invalidUpdateRequest.isError, true);
-    const invalidUrlRequest = await client.callTool({
-      name: "update_page_url",
-      arguments: {
-        website_id: "site-1",
-        page_id: "page-1",
-        url_slug: "/external/path",
-      },
+    assert.equal(invalidSectionRequest.isError, true);
+
+    const invalidSnapshotRequest = await client.callTool({
+      name: "get_snapshot",
+      arguments: { snapshot_id: "../../outside" },
     });
-    assert.equal(invalidUrlRequest.isError, true);
-    const invalidMoveRequest = await client.callTool({
-      name: "move_page",
-      arguments: {
-        website_id: "site-1",
-        page_id: "page-1",
-        destination_group: "unknown",
-      },
-    });
-    assert.equal(invalidMoveRequest.isError, true);
-    const invalidPublishRequest = await client.callTool({
-      name: "save_page_changes",
-      arguments: {
-        website_id: "site-1",
-        publish: true,
-      },
-    });
-    assert.equal(invalidPublishRequest.isError, true);
+    assert.equal(invalidSnapshotRequest.isError, true);
 
     const result = await client.callTool({ name: "list_websites", arguments: {} });
     assert.deepEqual(result.structuredContent, { result: [website] });

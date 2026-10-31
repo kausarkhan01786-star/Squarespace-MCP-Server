@@ -671,7 +671,10 @@ test("inspects Squarespace section records using the observed data-test selector
       await route.fulfill({
         contentType: "text/html",
         body: `<!doctype html><html><body>
-          <section data-test="page-section" data-section-id="section-1"><h2>About</h2><p>Visible content</p></section>
+          <section data-test="page-section" data-section-id="section-1" data-section-theme="light" data-fluid-engine-section>
+            <h2>About</h2>
+            <div id="block-1" data-block-type="1337" data-definition-name="website.components.html"><p>Visible content</p></div>
+          </section>
         </body></html>`,
       });
     });
@@ -682,6 +685,81 @@ test("inspects Squarespace section records using the observed data-test selector
     assert.equal(result.sections.length, 1);
     assert.equal(result.sections[0]?.id, "section-1");
     assert.deepEqual(result.sections[0]?.headings, ["About"]);
+    assert.equal(result.sections[0]?.theme, "light");
+    assert.equal(result.sections[0]?.layout, "fluid_engine");
+    assert.deepEqual(result.sections[0]?.blocks, [{
+      id: "block-1",
+      type: "1337",
+      definitionName: "website.components.html",
+      visibleText: "Visible content",
+      textTruncated: false,
+    }]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("lists and inspects a single observed section by its returned ID", async () => {
+  const { browser, page, pages } = await createFixture();
+  try {
+    await page.route("https://fixture.squarespace.com/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<!doctype html><html><body>
+          <section data-test="page-section" data-section-id="section-1"><h2>About</h2></section>
+          <section data-test="page-section" data-section-id="section-2"><h2>Contact</h2></section>
+        </body></html>`,
+      });
+    });
+    const records = await pages.listPages(website.id);
+    const servicesPage = records.find((record) => record.name === "Services");
+    assert.ok(servicesPage);
+
+    const listed = await pages.listPageSections(website.id, servicesPage.id);
+    assert.deepEqual(listed.sections.map((section) => section.id), ["section-1", "section-2"]);
+    await page.setContent(pagesPanelHtml);
+    const inspected = await pages.inspectSection(
+      website.id,
+      servicesPage.id,
+      " section-2 ",
+    );
+    assert.equal(inspected.section.id, "section-2");
+    assert.deepEqual(inspected.section.headings, ["Contact"]);
+    await page.setContent(pagesPanelHtml);
+    await assert.rejects(
+      () => pages.inspectSection(website.id, servicesPage.id, "missing"),
+      { code: "SECTION_NOT_FOUND" },
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+test("inspects mobile overflow at a narrow viewport and restores the original viewport", async () => {
+  const { browser, page, pages } = await createFixture();
+  try {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.route("https://fixture.squarespace.com/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <section data-test="page-section" data-section-id="section-wide">
+            <div style="width: 500px">Wide content</div>
+          </section>
+        </body></html>`,
+      });
+    });
+    const records = await pages.listPages(website.id);
+    const servicesPage = records.find((record) => record.name === "Services");
+    assert.ok(servicesPage);
+
+    const result = await pages.inspectMobileResponsive(website.id, servicesPage.id);
+    assert.deepEqual(result.mobileViewport, { width: 390, height: 844 });
+    assert.equal(result.desktop.viewportWidth, 1280);
+    assert.equal(result.mobile.viewportWidth, 390);
+    assert.equal(result.mobile.sections[0]?.id, "section-wide");
+    assert.equal(result.mobile.sections[0]?.horizontalOverflow, true);
+    assert.deepEqual(page.viewportSize(), { width: 1280, height: 720 });
   } finally {
     await browser.close();
   }

@@ -27,6 +27,29 @@ export interface LoginResult {
   currentUrl: string;
 }
 
+export interface AuthenticationDiagnostics {
+  profileDirectory: string;
+  pageCount: number;
+  hostname: string;
+  pathname: string;
+  url: string;
+  title: string;
+  loginFormVisible: boolean;
+  dashboardEvidenceVisible: boolean;
+  dashboardMarkerPresent: boolean;
+  websiteCardCount: number;
+  authenticated: boolean;
+}
+
+export interface AuthenticationSignals {
+  hostname: string;
+  pathname: string;
+  loginFormVisible: boolean;
+  dashboardEvidenceVisible: boolean;
+  dashboardMarkerPresent: boolean;
+  websiteCardCount: number;
+}
+
 export interface WebsiteSummary {
   id: string;
   name: string;
@@ -121,6 +144,31 @@ export class SquarespaceBrowserService {
     return this.isDashboardAuthenticated(page);
   }
 
+  async getAuthenticationDiagnostics(): Promise<AuthenticationDiagnostics> {
+    const page = await this.getPage();
+    const signals = await this.getAuthenticationSignals(page);
+    const diagnostics = {
+      profileDirectory: this.profileDirectory,
+      pageCount: this.context?.pages().filter((candidate) => !candidate.isClosed()).length ?? 0,
+      url: redactUrl(page.url()),
+      title: await page.title(),
+      ...signals,
+      authenticated: isAuthenticatedSquarespaceDashboard(signals),
+    };
+    console.info("[Squarespace auth] Browser session inspected.", {
+      profileDirectory: diagnostics.profileDirectory,
+      pageCount: diagnostics.pageCount,
+      url: diagnostics.url,
+      title: diagnostics.title,
+      loginFormVisible: diagnostics.loginFormVisible,
+      dashboardEvidenceVisible: diagnostics.dashboardEvidenceVisible,
+      dashboardMarkerPresent: diagnostics.dashboardMarkerPresent,
+      websiteCardCount: diagnostics.websiteCardCount,
+      authenticated: diagnostics.authenticated,
+    });
+    return diagnostics;
+  }
+
   async openAccountDashboard(): Promise<LoginResult> {
     const page = await this.getPage();
     await this.navigate(page, ACCOUNT_DASHBOARD_URL);
@@ -150,6 +198,7 @@ export class SquarespaceBrowserService {
         "The visible browser is open at the Squarespace dashboard or login page. Complete sign-in manually, then call list_websites again.",
       );
     }
+    await this.waitForWebsiteCards(page);
 
     // tsx injects a __name helper that is unavailable inside Playwright's page context.
     const discovered = await page.evaluate<DiscoveredWebsite[], void>(
@@ -298,20 +347,8 @@ export class SquarespaceBrowserService {
   }
 
   private async getPage(): Promise<Page> {
-    if (this.context?.pages().length && !this.context.pages()[0]?.isClosed()) {
-      const openPage = this.context.pages()[0];
-      if (openPage) {
-        this.page = openPage;
-        return openPage;
-      }
-    }
-
-    if (this.context) {
-      const existingPage = this.context.pages().find((candidate) => !candidate.isClosed());
-      if (existingPage) {
-        this.page = existingPage;
-        return existingPage;
-      }
+    if (this.page && !this.page.isClosed()) {
+      return this.page;
     }
 
     let context = this.context;
@@ -327,10 +364,18 @@ export class SquarespaceBrowserService {
       );
     }
 
+    const pages = context.pages().filter((candidate) => !candidate.isClosed());
+    const existingPage = pages.find((candidate) => candidate.url() !== "about:blank") ??
+      pages[0];
+    if (existingPage) {
+      this.page = existingPage;
+      this.setPageTimeouts(existingPage);
+      return existingPage;
+    }
+
     try {
       this.page = await context.newPage();
-      this.page.setDefaultTimeout(this.timeoutMs);
-      this.page.setDefaultNavigationTimeout(this.timeoutMs);
+      this.setPageTimeouts(this.page);
       return this.page;
     } catch (error) {
       this.context = undefined;
@@ -341,6 +386,11 @@ export class SquarespaceBrowserService {
         { cause: error },
       );
     }
+  }
+
+  private setPageTimeouts(page: Page): void {
+    page.setDefaultTimeout(this.timeoutMs);
+    page.setDefaultNavigationTimeout(this.timeoutMs);
   }
 
   private async launchContext(): Promise<void> {
@@ -386,27 +436,76 @@ export class SquarespaceBrowserService {
   }
 
   private async isDashboardAuthenticated(page: Page): Promise<boolean> {
-    const currentUrl = new URL(page.url());
-    if (
-      currentUrl.hostname !== "account.squarespace.com" ||
-      /login|sign.?in/i.test(currentUrl.pathname)
-    ) {
-      return false;
-    }
+    const diagnostics = await this.getAuthenticationDiagnosticsForPage(page);
+    const authenticated = isAuthenticatedSquarespaceDashboard(diagnostics.signals);
+    console.info("[Squarespace auth] Authentication result.", {
+      profileDirectory: this.profileDirectory,
+      pageCount: this.context?.pages().filter((candidate) => !candidate.isClosed()).length ?? 0,
+      url: redactUrl(page.url()),
+      title: diagnostics.title,
+      loginFormVisible: diagnostics.signals.loginFormVisible,
+      dashboardEvidenceVisible: diagnostics.signals.dashboardEvidenceVisible,
+      dashboardMarkerPresent: diagnostics.signals.dashboardMarkerPresent,
+      websiteCardCount: diagnostics.signals.websiteCardCount,
+      authenticated,
+    });
+    return authenticated;
+  }
 
+  private async getAuthenticationDiagnosticsForPage(page: Page): Promise<{
+    title: string;
+    signals: AuthenticationSignals;
+  }> {
+    return {
+      title: await page.title(),
+      signals: await this.getAuthenticationSignals(page),
+    };
+  }
+
+  private async getAuthenticationSignals(page: Page): Promise<AuthenticationSignals> {
+    const currentUrl = new URL(page.url());
     const loginFormVisible = await page
       .locator('input[type="password"], form[action*="login"], form[action*="sign-in"]')
-      .first()
-      .isVisible();
-    if (loginFormVisible) {
-      return false;
-    }
-
-    const dashboardEvidence = await page
+      .evaluateAll((elements) => elements.some((element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" &&
+          style.display !== "none" &&
+          rect.width > 0 &&
+          rect.height > 0;
+      }));
+    const dashboardEvidenceVisible = await page
       .getByText(/websites|domains|billing/i)
       .first()
       .isVisible();
-    return dashboardEvidence;
+    const dashboardMarkerPresent = await page
+      .locator('[data-test="account-dashboard-page"]')
+      .count() > 0;
+    const websiteCardCount = await page.locator('[data-test="websiteCard"]').count();
+    return {
+      hostname: currentUrl.hostname,
+      pathname: currentUrl.pathname,
+      loginFormVisible,
+      dashboardEvidenceVisible,
+      dashboardMarkerPresent,
+      websiteCardCount,
+    };
+  }
+
+  private async waitForWebsiteCards(page: Page): Promise<void> {
+    const deadline = Date.now() + Math.min(this.timeoutMs, 15_000);
+    const websiteCards = page.locator('[data-test="websiteCard"]');
+    while (Date.now() < deadline) {
+      if (await websiteCards.count() > 0) {
+        return;
+      }
+      await delay(Math.min(250, Math.max(1, deadline - Date.now())));
+    }
+
+    throw new SquarespaceBrowserError(
+      "WEBSITES_NOT_LOADED",
+      "The account dashboard is authenticated, but its website cards did not load. Retry list_websites after the dashboard finishes loading.",
+    );
   }
 
   private validateTimeout(value: number, name: string): void {
@@ -442,6 +541,15 @@ function isSquarespaceUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isAuthenticatedSquarespaceDashboard(
+  signals: AuthenticationSignals,
+): boolean {
+  return signals.hostname === "account.squarespace.com" &&
+    !/login|sign.?in/i.test(signals.pathname) &&
+    !signals.loginFormVisible &&
+    (signals.dashboardMarkerPresent || signals.websiteCardCount > 0);
 }
 
 function collectPageDetails(): RawPageInspection {

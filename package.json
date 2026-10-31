@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "tsx --test src/browser/squarespace-browser.security.test.ts src/browser/squarespace-pages.service.test.ts src/tools/pages-tools.test.ts",
+    "test": "tsx --test src/browser/squarespace-browser.security.test.ts src/browser/squarespace-browser.service.test.ts src/browser/squarespace-pages.service.test.ts src/browser/squarespace-pages.seo.test.ts src/backups/page-backup.service.test.ts src/tools/pages-tools.test.ts src/tools/design-tools.test.ts src/tools/navigation-seo-settings-tools.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

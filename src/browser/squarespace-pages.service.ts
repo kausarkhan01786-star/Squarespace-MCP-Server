@@ -8,10 +8,14 @@ import type { SquarespaceBrowserService, WebsiteSummary } from "./squarespace-br
 const PAGES_PANEL_SELECTOR = '[data-test="pages-panel"]';
 const PAGE_ITEM_SELECTOR = '[data-test="pages-panel-item"]';
 const GROUP_SELECTOR = '[data-test="pages-panel-group"]';
-const SECTION_SELECTOR = '[data-test="page-section"]';
+export const SQUARESPACE_PAGE_SECTION_SELECTOR = '[data-test="page-section"]';
+export const SQUARESPACE_CONTENT_BLOCK_SELECTOR = "[data-block-type]";
+const SECTION_SELECTOR = SQUARESPACE_PAGE_SECTION_SELECTOR;
 const EDITOR_ACTION_SELECTOR = 'button, [role="button"]';
 const MAX_SECTIONS = 50;
 const MAX_SECTION_TEXT_LENGTH = 4_000;
+const MAX_BLOCKS_PER_SECTION = 100;
+const MAX_BLOCK_TEXT_LENGTH = 1_000;
 
 export type NavigationGroup = "main_navigation" | "not_linked" | "footer_navigation" | "other";
 export type SquarespacePageType = "page" | "folder";
@@ -40,9 +44,49 @@ export interface PageNavigationNode extends SquarespacePage {
 
 export interface PageSection {
   id: string | null;
+  theme: string | null;
+  layout: "fluid_engine" | "unknown";
   headings: string[];
   visibleText: string;
   textTruncated: boolean;
+  blocks: PageSectionBlock[];
+  blocksTruncated: boolean;
+}
+
+export interface PageSectionBlock {
+  id: string | null;
+  type: string | null;
+  definitionName?: string | null;
+  visibleText: string;
+  textTruncated: boolean;
+}
+
+export interface PageSeoSettings {
+  websiteId: string;
+  pageId: string;
+  pageName: string;
+  pageTitle: string | null;
+  slug: string | null;
+  isHomepage: boolean;
+  seoTitle: string | null;
+  seoDescription: string | null;
+  seoFieldsAvailable: boolean;
+  hiddenFromSearchResults: boolean | null;
+  socialImageUploadAvailable: boolean;
+  socialImagePreviewCount: number;
+  source: "squarespace_page_settings";
+}
+
+export interface ResponsivePageInspection {
+  viewportWidth: number;
+  documentWidth: number;
+  horizontalOverflow: boolean;
+  sections: Array<{
+    id: string | null;
+    width: number;
+    contentWidth: number;
+    horizontalOverflow: boolean;
+  }>;
 }
 
 export interface RawPagePanelItem {
@@ -987,6 +1031,142 @@ export class SquarespacePagesService {
     return { websiteId, pageId, url: page.url };
   }
 
+  async inspectPageSeoSettings(
+    websiteId: string,
+    pageId: string,
+  ): Promise<PageSeoSettings> {
+    const target = await this.getPageDetails(websiteId, pageId);
+    if (target.type === "folder") {
+      throw new SquarespaceBrowserError(
+        "PAGE_SETTINGS_FAILED",
+        "SEO settings are only available for pages, not navigation folders.",
+      );
+    }
+
+    const initialPages = await this.readWebsitePages(websiteId);
+    const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
+    if (targetIndex < 0) {
+      throw new SquarespaceBrowserError(
+        "PAGE_NOT_FOUND",
+        "The requested page was not found on this website. Refresh list_pages and use a returned page ID.",
+      );
+    }
+
+    this.browser.getWebsite(websiteId);
+    await this.browser.openWebsitePages(websiteId);
+    const page = await this.browser.getCurrentPage();
+    await this.waitForPagesPanel(page);
+    const expandedFolderKeys: string[] = [];
+
+    try {
+      await this.expandCollapsedFolders(page, expandedFolderKeys);
+      const items = await this.readPanelItems(page);
+      if (targetIndex >= items.length) {
+        throw new SquarespaceBrowserError(
+          "PAGE_SETTINGS_FAILED",
+          "The selected page could not be matched to its visible Pages panel row.",
+        );
+      }
+
+      const row = page.locator(PAGE_ITEM_SELECTOR).nth(targetIndex);
+      const settingsButton = row.locator('button[aria-label^="Page settings "]');
+      if (await settingsButton.count() !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_SETTINGS_FAILED",
+          "The selected page did not expose one unambiguous Page Settings control.",
+        );
+      }
+      await settingsButton.click();
+      const dialog = page.locator('[role="dialog"]').last();
+      await dialog.waitFor({ state: "visible", timeout: this.timeoutMs });
+
+      const pageTitle = await readTextbox(dialog, "Page Title");
+      const slug = await readTextbox(dialog, "URL Slug");
+      const seoTab = dialog.locator('input[aria-label="SEO"]');
+      if (await seoTab.count() !== 1) {
+        throw new SquarespaceBrowserError(
+          "SEO_SETTINGS_NOT_AVAILABLE",
+          "Squarespace did not expose one unambiguous SEO tab for this page.",
+        );
+      }
+      await seoTab.evaluate((element) => (element as HTMLInputElement).click());
+      await page.waitForTimeout(100);
+
+      const seoTitleField = dialog.locator('textarea[aria-label="SEO Title (Optional)"]');
+      const seoDescriptionField = dialog.locator(
+        'textarea[aria-label="SEO Description (Optional)"]',
+      );
+      const indexingCheckbox = dialog.locator(
+        'input[aria-label="Hide Page from Search Results"]',
+      );
+      const seoTitleCount = await seoTitleField.count();
+      const seoDescriptionCount = await seoDescriptionField.count();
+      const indexingCount = await indexingCheckbox.count();
+      if (seoTitleCount > 1 || seoDescriptionCount > 1 || indexingCount > 1) {
+        throw new SquarespaceBrowserError(
+          "SEO_SETTINGS_NOT_AVAILABLE",
+          "Squarespace exposed ambiguous SEO controls; the service did not choose between them.",
+        );
+      }
+
+      const seoTitle = seoTitleCount === 1
+        ? await seoTitleField.inputValue()
+        : null;
+      const seoDescription = seoDescriptionCount === 1
+        ? await seoDescriptionField.inputValue()
+        : null;
+      const hiddenFromSearchResults = indexingCount === 1
+        ? await indexingCheckbox.isChecked()
+        : null;
+      const seoFieldsAvailable = seoTitleCount === 1 && seoDescriptionCount === 1;
+
+      const socialImageTab = dialog.locator('input[aria-label="Social Image"]');
+      if (await socialImageTab.count() !== 1) {
+        throw new SquarespaceBrowserError(
+          "SEO_SETTINGS_NOT_AVAILABLE",
+          "Squarespace did not expose the observed Social Image tab for this page.",
+        );
+      }
+      await socialImageTab.evaluate((element) => (element as HTMLInputElement).click());
+      await page.waitForTimeout(100);
+      const socialImageUploadAvailable =
+        (await dialog.locator('input[type="file"]').count()) > 0;
+      const socialImagePreviewCount = await dialog.locator("img").evaluateAll(
+        (images) => images.filter((image) => {
+          const style = window.getComputedStyle(image);
+          const rect = image.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0;
+        }).length,
+      );
+
+      return {
+        websiteId,
+        pageId,
+        pageName: target.name,
+        pageTitle,
+        slug,
+        isHomepage: target.url !== null && new URL(target.url).pathname === "/",
+        seoTitle,
+        seoDescription,
+        seoFieldsAvailable,
+        hiddenFromSearchResults,
+        socialImageUploadAvailable,
+        socialImagePreviewCount,
+        source: "squarespace_page_settings",
+      };
+    } finally {
+      const dialog = page.locator('[role="dialog"]').last();
+      if (await dialog.isVisible().catch(() => false)) {
+        await dialog.getByRole("button", { name: "Close", exact: true }).click();
+        await dialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
+      }
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+    }
+  }
+
   async getNavigationStructure(
     websiteId: string,
   ): Promise<{ websiteId: string; groups: Array<{ group: NavigationGroup; label: string; pages: PageNavigationNode[] }> }> {
@@ -1043,7 +1223,13 @@ export class SquarespacePagesService {
     const sectionResult = await frame.locator(SECTION_SELECTOR).evaluateAll(
       (
         elements: HTMLElement[],
-        limits: { maxTextLength: number; maxSections: number },
+        limits: {
+          blockSelector: string;
+          maxTextLength: number;
+          maxSections: number;
+          maxBlocksPerSection: number;
+          maxBlockTextLength: number;
+        },
       ) => ({
         totalCount: elements.length,
         sections: elements.slice(0, limits.maxSections).map((section) => {
@@ -1055,8 +1241,15 @@ export class SquarespacePagesService {
             rect.width > 0 &&
             rect.height > 0;
           const text = visible ? (section.innerText || "").trim() : "";
+          const allBlocks = Array.from(
+            section.querySelectorAll<HTMLElement>(limits.blockSelector),
+          );
           return {
             id: section.getAttribute("data-section-id"),
+            theme: section.getAttribute("data-section-theme"),
+            layout: section.hasAttribute("data-fluid-engine-section")
+              ? "fluid_engine" as const
+              : "unknown" as const,
             headings: Array.from(section.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6"))
               .filter((heading) => {
                 const headingStyle = window.getComputedStyle(heading);
@@ -1073,10 +1266,27 @@ export class SquarespacePagesService {
               .slice(0, 20),
             visibleText: text.slice(0, limits.maxTextLength),
             textTruncated: text.length > limits.maxTextLength,
+            blocks: allBlocks.slice(0, limits.maxBlocksPerSection).map((block) => {
+              const blockText = visible ? (block.innerText || "").trim() : "";
+              return {
+                id: block.getAttribute("id"),
+                type: block.getAttribute("data-block-type"),
+                definitionName: block.getAttribute("data-definition-name"),
+                visibleText: blockText.slice(0, limits.maxBlockTextLength),
+                textTruncated: blockText.length > limits.maxBlockTextLength,
+              };
+            }),
+            blocksTruncated: allBlocks.length > limits.maxBlocksPerSection,
           };
         }),
       }),
-      { maxTextLength: MAX_SECTION_TEXT_LENGTH, maxSections: MAX_SECTIONS },
+      {
+        blockSelector: SQUARESPACE_CONTENT_BLOCK_SELECTOR,
+        maxTextLength: MAX_SECTION_TEXT_LENGTH,
+        maxSections: MAX_SECTIONS,
+        maxBlocksPerSection: MAX_BLOCKS_PER_SECTION,
+        maxBlockTextLength: MAX_BLOCK_TEXT_LENGTH,
+      },
     );
 
     return {
@@ -1085,6 +1295,99 @@ export class SquarespacePagesService {
       url: targetUrl.toString(),
       sections: sectionResult.sections,
       sectionsTruncated: sectionResult.totalCount > sectionResult.sections.length,
+    };
+  }
+
+  async listPageSections(
+    websiteId: string,
+    pageId: string,
+  ): Promise<Awaited<ReturnType<SquarespacePagesService["inspectPageSections"]>>> {
+    return this.inspectPageSections(websiteId, pageId);
+  }
+
+  async inspectSection(
+    websiteId: string,
+    pageId: string,
+    sectionId: string,
+  ): Promise<{
+    websiteId: string;
+    pageId: string;
+    url: string;
+    section: PageSection;
+  }> {
+    const normalizedSectionId = sectionId.trim();
+    if (!normalizedSectionId) {
+      throw new SquarespaceBrowserError(
+        "SECTION_NOT_FOUND",
+        "A non-empty section ID is required.",
+      );
+    }
+    const result = await this.inspectPageSections(websiteId, pageId);
+    const section = result.sections.find((candidate) => candidate.id === normalizedSectionId);
+    if (!section) {
+      throw new SquarespaceBrowserError(
+        "SECTION_NOT_FOUND",
+        "The requested section was not found on this page. Refresh list_page_sections and use a returned section ID.",
+      );
+    }
+    return {
+      websiteId: result.websiteId,
+      pageId: result.pageId,
+      url: result.url,
+      section,
+    };
+  }
+
+  async inspectMobileResponsive(
+    websiteId: string,
+    pageId: string,
+  ): Promise<{
+    websiteId: string;
+    pageId: string;
+    url: string;
+    desktop: ResponsivePageInspection;
+    mobile: ResponsivePageInspection;
+    mobileViewport: { width: number; height: number };
+  }> {
+    const pageRecord = await this.getPageDetails(websiteId, pageId);
+    if (!pageRecord.url || pageRecord.type === "folder") {
+      throw new SquarespaceBrowserError(
+        "SECTIONS_NOT_AVAILABLE",
+        "Responsive inspection requires a page with a Squarespace URL.",
+      );
+    }
+
+    const targetUrl = assertAllowedSquarespaceUrl(pageRecord.url);
+    const website = this.browser.getWebsite(websiteId);
+    if (targetUrl.origin !== new URL(website.url).origin) {
+      throw new SquarespaceBrowserError(
+        "INVALID_URL",
+        "Responsive inspection is restricted to the selected Squarespace website.",
+      );
+    }
+
+    await this.browser.openWebsiteUrl(websiteId, targetUrl.toString());
+    const page = await this.browser.getCurrentPage();
+    const frame = await this.waitForPageFrame(page, targetUrl);
+    const originalViewport = page.viewportSize() ?? { width: 1280, height: 720 };
+    const mobileViewport = { width: 390, height: 844 };
+    const desktop = await this.inspectResponsiveFrame(frame);
+    let mobile: ResponsivePageInspection;
+    try {
+      await page.setViewportSize(mobileViewport);
+      await delay(100);
+      mobile = await this.inspectResponsiveFrame(frame);
+    } finally {
+      await page.setViewportSize(originalViewport);
+    }
+
+    return {
+      websiteId,
+      pageId,
+      url: targetUrl.toString(),
+      desktop,
+      mobile,
+      mobileViewport,
     };
   }
 
@@ -1683,6 +1986,30 @@ export class SquarespacePagesService {
       await dialog.getByRole("button", { name: "Close", exact: true }).click();
       await dialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
     }
+  }
+
+  private async inspectResponsiveFrame(
+    frame: Frame,
+  ): Promise<ResponsivePageInspection> {
+    return frame.evaluate((options) => {
+      const documentWidth = document.documentElement.scrollWidth;
+      const viewportWidth = window.innerWidth;
+      const sections = Array.from(
+        document.querySelectorAll<HTMLElement>(options.selector),
+      ).slice(0, options.maxSections).map((section) => ({
+        id: section.getAttribute("data-section-id"),
+        width: Math.round(section.getBoundingClientRect().width),
+        contentWidth: section.scrollWidth,
+        horizontalOverflow: section.scrollWidth > section.clientWidth + 1,
+      }));
+      return {
+        viewportWidth,
+        documentWidth,
+        horizontalOverflow: documentWidth > viewportWidth + 1 ||
+          sections.some((section) => section.horizontalOverflow),
+        sections,
+      };
+    }, { selector: SECTION_SELECTOR, maxSections: MAX_SECTIONS });
   }
 
   private async waitForPageFrame(page: Page, targetUrl: URL): Promise<Frame> {
