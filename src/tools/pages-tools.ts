@@ -13,10 +13,23 @@ const pageInputSchema = websiteIdSchema.extend({
 const listPagesSchema = websiteIdSchema.extend({
   group: z.enum(["main_navigation", "footer_navigation", "not_linked", "other"]).optional(),
 });
+const createPageSchema = websiteIdSchema.extend({
+  title: z.string().trim().min(1).max(100).describe("Title for the new page."),
+  page_type: z.enum(["page", "blog"]).describe("Blank Squarespace page type to create."),
+  navigation_group: z
+    .enum(["main_navigation", "not_linked", "footer_navigation"])
+    .describe("Navigation group where the page should be created."),
+});
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
+  openWorldHint: false,
+} as const;
+const pageCreationAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
   openWorldHint: false,
 } as const;
 
@@ -32,7 +45,21 @@ export function registerPagesTools(
       outputSchema,
       annotations: readOnlyAnnotations,
     },
-    async () => runReadOnlyTool("list_websites", () => pages.listWebsites()),
+    async () => runTool("list_websites", () => pages.listWebsites()),
+  );
+
+  server.registerTool(
+    "create_page",
+    {
+      description: "Create a blank Squarespace Page or Blog in a selected navigation group. Does not invoke a publish action.",
+      inputSchema: createPageSchema,
+      outputSchema,
+      annotations: pageCreationAnnotations,
+    },
+    async ({ website_id, title, page_type, navigation_group }) =>
+      runTool("create_page", () =>
+        pages.createPage(website_id, title, page_type, navigation_group),
+      ),
   );
 
   server.registerTool(
@@ -44,7 +71,7 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, group }) =>
-      runReadOnlyTool("list_pages", () =>
+      runTool("list_pages", () =>
         pages.listPages(website_id, group),
       ),
   );
@@ -58,7 +85,7 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runReadOnlyTool("get_page_details", () =>
+      runTool("get_page_details", () =>
         pages.getPageDetails(website_id, page_id),
       ),
   );
@@ -72,7 +99,7 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runReadOnlyTool("get_page_url", () => pages.getPageUrl(website_id, page_id)),
+      runTool("get_page_url", () => pages.getPageUrl(website_id, page_id)),
   );
 
   server.registerTool(
@@ -84,7 +111,7 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id }) =>
-      runReadOnlyTool("get_navigation_structure", () =>
+      runTool("get_navigation_structure", () =>
         pages.getNavigationStructure(website_id),
       ),
   );
@@ -98,7 +125,7 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id }) =>
-      runReadOnlyTool("list_not_linked_pages", () =>
+      runTool("list_not_linked_pages", () =>
         pages.listNotLinkedPages(website_id),
       ),
   );
@@ -112,13 +139,13 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runReadOnlyTool("inspect_page_sections", () =>
+      runTool("inspect_page_sections", () =>
         pages.inspectPageSections(website_id, page_id),
       ),
   );
 }
 
-async function runReadOnlyTool(
+async function runTool(
   toolName: string,
   action: () => Promise<unknown>,
 ): Promise<{

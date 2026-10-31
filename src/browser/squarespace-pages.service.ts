@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Frame, Page } from "playwright";
 import { SquarespaceBrowserError } from "./browser-errors.js";
@@ -14,6 +14,8 @@ const MAX_SECTION_TEXT_LENGTH = 4_000;
 
 export type NavigationGroup = "main_navigation" | "not_linked" | "footer_navigation" | "other";
 export type SquarespacePageType = "page" | "folder";
+export type SquarespacePageCreationType = "page" | "blog";
+export type PageCreationGroup = Exclude<NavigationGroup, "other">;
 export type PageVisibilityStatus = "enabled" | "disabled" | "unknown";
 
 export interface SquarespacePage {
@@ -68,6 +70,7 @@ interface SquarespacePagesBrowser {
   openWebsitePages(websiteId: string): Promise<void>;
   openWebsiteUrl(websiteId: string, destination: string): Promise<void>;
   getCurrentPage(): Promise<Page>;
+  captureScreenshot(fileName?: string): Promise<string>;
 }
 
 export class SquarespacePagesService {
@@ -82,6 +85,157 @@ export class SquarespacePagesService {
 
   async listWebsites(): Promise<WebsiteSummary[]> {
     return this.browser.listWebsites();
+  }
+
+  async createPage(
+    websiteId: string,
+    title: string,
+    pageType: SquarespacePageCreationType,
+    group: PageCreationGroup,
+  ): Promise<{
+    success: true;
+    saved: true;
+    pageType: SquarespacePageCreationType;
+    page: SquarespacePage;
+    screenshots: { before: string; after: string };
+  }> {
+    const normalizedTitle = title.trim();
+    if (normalizedTitle.length === 0 || normalizedTitle.length > 100) {
+      throw new SquarespaceBrowserError(
+        "PAGE_CREATION_FAILED",
+        "Page titles must contain between 1 and 100 characters.",
+      );
+    }
+
+    const website = this.browser.getWebsite(websiteId);
+    await this.browser.openWebsitePages(websiteId);
+    const page = await this.browser.getCurrentPage();
+    await this.waitForPagesPanel(page);
+    const initialItems = await this.readPanelItems(page);
+    const screenshotId = randomUUID();
+    const beforeScreenshot = await this.browser.captureScreenshot(
+      `create-page-before-${screenshotId}.png`,
+    );
+    const afterScreenshotName = `create-page-after-${screenshotId}.png`;
+    let creationAttempted = false;
+    let afterScreenshotAttempted = false;
+
+    try {
+      const groupLabel = navigationGroupLabel(group);
+      const addButtons = page.locator('button[title^="Add a new page to the"]');
+      const matchingAddButtonIndices = await addButtons.evaluateAll(
+        (buttons, expectedGroup) =>
+          buttons.flatMap((button, index) =>
+            (button.getAttribute("title") ?? "").includes(`"${expectedGroup}"`)
+              ? [index]
+              : [],
+          ),
+        groupLabel,
+      );
+      if (matchingAddButtonIndices.length !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_CREATION_FAILED",
+          `Squarespace did not expose one unambiguous Add Page control for ${groupLabel}.`,
+        );
+      }
+
+      await addButtons.nth(matchingAddButtonIndices[0]!).click();
+      const catalog = page.locator('[data-test="catalog-dialog"]');
+      await catalog.waitFor({ state: "visible", timeout: this.timeoutMs });
+      await catalog.locator('[data-test="add-blank-options-button"]').click();
+
+      const blankOption = page.locator(`[data-test="blank-${pageType}-option"]`);
+      await blankOption.waitFor({ state: "visible", timeout: this.timeoutMs });
+      creationAttempted = true;
+      await blankOption.click();
+
+      const createdItem = await this.waitForNewPage(page, initialItems, groupLabel);
+      const createdRow = page.locator(PAGE_ITEM_SELECTOR).nth(createdItem.index);
+      const settingsButton = createdRow.locator('button[aria-label^="Page settings "]');
+      await settingsButton.click();
+
+      const dialog = page.locator('[role="dialog"]').last();
+      await dialog.waitFor({ state: "visible", timeout: this.timeoutMs });
+      const titleField = dialog.getByRole("textbox", { name: "Page Title" });
+      const navigationTitleField = dialog.getByRole("textbox", { name: "Navigation Title" });
+      if ((await titleField.count()) !== 1 || (await navigationTitleField.count()) !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_CREATION_FAILED",
+          "The new page did not expose the observed Page Title and Navigation Title fields.",
+        );
+      }
+
+      await titleField.fill(normalizedTitle);
+      await navigationTitleField.fill(normalizedTitle);
+      await navigationTitleField.press("Tab");
+      await dialog.getByRole("button", { name: "Close", exact: true }).click();
+      await dialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
+
+      const finalItems = await this.readPanelItems(page);
+      const matchingItems = finalItems.filter(
+        (item) => item.groupLabel === groupLabel && item.name === normalizedTitle,
+      );
+      if (matchingItems.length !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_CREATION_FAILED",
+          "Squarespace did not show one unambiguous page row with the requested title after creation.",
+        );
+      }
+
+      const finalRow = page.locator(PAGE_ITEM_SELECTOR).nth(matchingItems[0]!.index);
+      const savedSettings = await this.readPageSettings(page, finalRow, "page");
+      if (
+        savedSettings.pageTitle !== normalizedTitle ||
+        savedSettings.navigationTitle !== normalizedTitle
+      ) {
+        throw new SquarespaceBrowserError(
+          "PAGE_CREATION_FAILED",
+          "Squarespace did not confirm that the requested page title and navigation title were saved.",
+        );
+      }
+
+      const [createdPage] = createPageRecords(websiteId, website.url, [
+        { ...matchingItems[0]!, ...savedSettings },
+      ]);
+      if (!createdPage) {
+        throw new SquarespaceBrowserError(
+          "PAGE_CREATION_FAILED",
+          "Squarespace showed the new page, but the service could not construct its verified page record.",
+        );
+      }
+
+      afterScreenshotAttempted = true;
+      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      return {
+        success: true,
+        saved: true,
+        pageType,
+        page: createdPage,
+        screenshots: { before: beforeScreenshot, after: afterScreenshot },
+      };
+    } catch (error) {
+      if (creationAttempted && !afterScreenshotAttempted) {
+        afterScreenshotAttempted = true;
+        try {
+          await this.browser.captureScreenshot(afterScreenshotName);
+        } catch (screenshotError) {
+          throw new SquarespaceBrowserError(
+            "SCREENSHOT_FAILED",
+            "Page creation was not confirmed, and the post-operation screenshot also failed.",
+            { cause: new AggregateError([error, screenshotError]) },
+          );
+        }
+      }
+
+      if (error instanceof SquarespaceBrowserError) {
+        throw error;
+      }
+      throw new SquarespaceBrowserError(
+        "PAGE_CREATION_FAILED",
+        "Squarespace did not confirm that the requested page was created and saved.",
+        { cause: error },
+      );
+    }
   }
 
   async listPages(
@@ -315,6 +469,68 @@ export class SquarespacePagesService {
     return assignParentIndices(rows);
   }
 
+  private async waitForNewPage(
+    page: Page,
+    initialItems: RawPagePanelItem[],
+    groupLabel: string,
+  ): Promise<RawPagePanelItem> {
+    const initialKeys = pageItemKeys(initialItems);
+    const initialCounts = countKeys(initialKeys);
+    const deadline = Date.now() + this.timeoutMs;
+
+    while (Date.now() < deadline) {
+      const currentItems = await this.readPanelItems(page);
+      const currentKeys = pageItemKeys(currentItems);
+      const currentCounts = countKeys(currentKeys);
+      const newKeys = new Set(
+        currentItems.flatMap((item, index) => {
+          const key = currentKeys[index];
+          return item.groupLabel === groupLabel &&
+            key !== undefined &&
+            (currentCounts.get(key) ?? 0) > (initialCounts.get(key) ?? 0)
+            ? [key]
+            : [];
+        }),
+      );
+
+      if (newKeys.size > 0) {
+        if (newKeys.size !== 1) {
+          throw new SquarespaceBrowserError(
+            "PAGE_CREATION_FAILED",
+            "More than one new page row appeared; the service will not guess which one to rename.",
+          );
+        }
+        const [newKey] = newKeys;
+        if (!newKey || (initialCounts.get(newKey) ?? 0) > 0) {
+          throw new SquarespaceBrowserError(
+            "PAGE_CREATION_FAILED",
+            "The new page row is indistinguishable from an existing page; the service will not risk renaming the wrong page.",
+          );
+        }
+        const matchingIndices = currentKeys.flatMap((key, index) =>
+          key === newKey ? [index] : [],
+        );
+        if (matchingIndices.length !== 1) {
+          throw new SquarespaceBrowserError(
+            "PAGE_CREATION_FAILED",
+            "The new page row could not be identified unambiguously.",
+          );
+        }
+        const createdItem = currentItems[matchingIndices[0]!];
+        if (createdItem) {
+          return createdItem;
+        }
+      }
+
+      await delay(150);
+    }
+
+    throw new SquarespaceBrowserError(
+      "PAGE_CREATION_FAILED",
+      "Squarespace did not confirm a new page row before the operation timed out.",
+    );
+  }
+
   private async expandCollapsedFolders(page: Page, expandedKeys: string[]): Promise<void> {
     const selector =
       `${PAGE_ITEM_SELECTOR} button[aria-label^="Expand child pages "]:not([aria-expanded="true"])`;
@@ -506,6 +722,25 @@ export class SquarespacePagesService {
       "SECTIONS_NOT_AVAILABLE",
       "The requested page preview did not load within the timeout.",
     );
+  }
+}
+
+function countKeys(keys: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const key of keys) {
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function navigationGroupLabel(group: PageCreationGroup): string {
+  switch (group) {
+    case "main_navigation":
+      return "Main Navigation";
+    case "not_linked":
+      return "Not Linked";
+    case "footer_navigation":
+      return "Footer Navigation";
   }
 }
 

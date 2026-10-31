@@ -45,6 +45,7 @@ const pagesPanelHtml = `<!doctype html>
             </div>
           </div>
         </div>
+        <button title="Add a new page to the &quot;Main Navigation&quot; group"></button>
       </section>
       <section>
         <div data-test="pages-panel-group"><h2>Footer Navigation</h2></div>
@@ -92,6 +93,107 @@ const pagesPanelHtml = `<!doctype html>
   </script>
 </body></html>`;
 
+const createPageHtml = (persistTitles: boolean, groupLabel: string) => {
+  const addButtonTitle = groupLabel === "Not Linked"
+    ? `Add a new page to the "${groupLabel}" navigation group`
+    : `Add a new page to the "${groupLabel}" group`;
+  return `<!doctype html>
+<html><body>
+  <div data-test="pages-panel">
+    <section>
+      <div data-test="pages-panel-group"><h2>${groupLabel}</h2></div>
+      <div data-test="pages-panel-item">
+        <div><button aria-label="Page settings Existing"></button></div>
+      </div>
+      <button title="${addButtonTitle.replace(/"/g, "&quot;")}"></button>
+    </section>
+  </div>
+  <script>
+    const records = {
+      Existing: { pageTitle: 'Existing', navigationTitle: 'Existing', slug: 'existing' }
+    };
+    const persistTitles = ${persistTitles};
+    const groupLabel = ${JSON.stringify(groupLabel)};
+    const group = document.querySelector('section');
+    let activeRecord = null;
+    document.addEventListener('click', event => {
+      const target = event.target instanceof Element
+        ? event.target.closest('button, a, [role="menuitem"]')
+        : null;
+      if (!target) return;
+      if (target.matches('button[title^="Add a new page to"]')) {
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-label', 'Add a Page');
+        dialog.setAttribute('data-test', 'catalog-dialog');
+        dialog.innerHTML = '<a data-test="add-blank-options-button">Add Blank</a>';
+        document.body.append(dialog);
+        return;
+      }
+      if (target.matches('[data-test="add-blank-options-button"]')) {
+        const menu = document.createElement('div');
+        menu.setAttribute('role', 'menu');
+        menu.innerHTML =
+          '<div role="menuitem" data-test="blank-page-option">Page</div>' +
+          '<div role="menuitem" data-test="blank-blog-option">Blog</div>';
+        document.body.append(menu);
+        return;
+      }
+      if (target.matches('[data-test="blank-page-option"], [data-test="blank-blog-option"]')) {
+        const name = 'Untitled';
+        activeRecord = { pageTitle: name, navigationTitle: name, slug: 'untitled' };
+        records[name] = activeRecord;
+        const row = document.createElement('div');
+        row.setAttribute('data-test', 'pages-panel-item');
+        row.innerHTML =
+          '<div><button aria-label="Page settings ' + name + '"></button></div>';
+        group.insertBefore(row, group.querySelector('button[title^="Add a new page to"]'));
+        document.querySelector('[data-test="catalog-dialog"]').remove();
+        document.querySelector('[role="menu"]').remove();
+        return;
+      }
+      if (target.matches('button[aria-label^="Page settings "]')) {
+        const name = target.getAttribute('aria-label').slice('Page settings '.length);
+        activeRecord = records[name] || activeRecord;
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        dialog.innerHTML =
+          '<h1>Page Settings</h1>' +
+          '<label>Page Title<input aria-label="Page Title" value="' + activeRecord.pageTitle + '"></label>' +
+          '<label>Navigation Title<input aria-label="Navigation Title" value="' + activeRecord.navigationTitle + '"></label>' +
+          '<label>URL Slug<input aria-label="URL Slug" value="' + activeRecord.slug + '"></label>' +
+          '<button data-test="nav-modal-close-button">Close</button>';
+        document.body.append(dialog);
+        return;
+      }
+      if (target.matches('button[data-test="nav-modal-close-button"]')) {
+        target.closest('[role="dialog"]').remove();
+      }
+    });
+    document.addEventListener('input', event => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || !activeRecord) return;
+      if (input.getAttribute('aria-label') === 'Page Title') {
+        if (persistTitles) {
+          delete records[activeRecord.pageTitle];
+          activeRecord.pageTitle = input.value;
+          activeRecord.slug = input.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+          records[activeRecord.pageTitle] = activeRecord;
+        }
+      } else if (input.getAttribute('aria-label') === 'Navigation Title') {
+        if (persistTitles) activeRecord.navigationTitle = input.value;
+      }
+      const row = Array.from(document.querySelectorAll('[data-test="pages-panel-item"]'))
+        .find(item => item.querySelector('button[aria-label^="Page settings ' + input.defaultValue + '"]'));
+      if (row && input.getAttribute('aria-label') === 'Page Title') {
+        row.querySelector('button[aria-label^="Page settings "]')
+          .setAttribute('aria-label', 'Page settings ' + input.value);
+      }
+    });
+  </script>
+</body></html>`;
+};
+
 test("reads and categorizes nested page records without leaving folder UI expanded", async () => {
   const { browser, page, pages } = await createFixture();
   try {
@@ -129,6 +231,85 @@ test("reads and categorizes nested page records without leaving folder UI expand
     await assert.rejects(() => pages.getPageDetails(website.id, "missing"), {
       code: "PAGE_NOT_FOUND",
     });
+  } finally {
+    await browser.close();
+  }
+});
+
+test("creates a blank page, verifies saved titles, and captures before/after screenshots", async () => {
+  const { browser, page, pages, screenshots } = await createPageFixture();
+  try {
+    const result = await pages.createPage(
+      website.id,
+      "A new page",
+      "page",
+      "main_navigation",
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.pageType, "page");
+    assert.equal(result.page.name, "A new page");
+    assert.equal(result.page.navigationTitle, "A new page");
+    assert.equal(result.page.url, "https://fixture.squarespace.com/a-new-page");
+    assert.deepEqual(result.screenshots, {
+      before: screenshots[0],
+      after: screenshots[1],
+    });
+    assert.match(result.screenshots.before, /^create-page-before-.*\.png$/);
+    assert.match(result.screenshots.after, /^create-page-after-.*\.png$/);
+    assert.equal(screenshots.length, 2);
+    assert.equal(
+      (await page.locator('[data-test="pages-panel-item"]').count()),
+      2,
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+test("supports the observed blank Blog option", async () => {
+  const { browser, pages } = await createPageFixture();
+  try {
+    const result = await pages.createPage(
+      website.id,
+      "News",
+      "blog",
+      "main_navigation",
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.pageType, "blog");
+    assert.equal(result.page.name, "News");
+    assert.equal(result.page.group, "main_navigation");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("selects the observed Not Linked add-page control", async () => {
+  const { browser, pages } = await createPageFixture(true, "Not Linked");
+  try {
+    const result = await pages.createPage(
+      website.id,
+      "Private page",
+      "page",
+      "not_linked",
+    );
+    assert.equal(result.page.group, "not_linked");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("does not report success when the requested title does not persist", async () => {
+  const { browser, pages, screenshots } = await createPageFixture(false);
+  try {
+    await assert.rejects(
+      () => pages.createPage(website.id, "Unsaved title", "page", "main_navigation"),
+      { code: "PAGE_CREATION_FAILED" },
+    );
+    assert.equal(screenshots.length, 2);
   } finally {
     await browser.close();
   }
@@ -190,6 +371,56 @@ async function createFixture(): Promise<{
     async getCurrentPage() {
       return page;
     },
+    async captureScreenshot() {
+      return "fixture-screenshot.png";
+    },
   });
   return { browser, page, pages };
+}
+
+async function createPageFixture(
+  persistTitles = true,
+  groupLabel = "Main Navigation",
+): Promise<{
+  browser: Browser;
+  page: Page;
+  pages: SquarespacePagesService;
+  screenshots: string[];
+}> {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const screenshots: string[] = [];
+  const pages = new SquarespacePagesService(
+    {
+      async listWebsites() {
+        return [website];
+      },
+      getWebsite(websiteId: string) {
+        if (websiteId !== website.id) {
+          throw new Error("Unknown fixture website.");
+        }
+        return website;
+      },
+      async openWebsitePages(websiteId: string) {
+        if (websiteId !== website.id) {
+          throw new Error("Unknown fixture website.");
+        }
+        await page.setContent(createPageHtml(persistTitles, groupLabel));
+      },
+      async openWebsiteUrl(websiteId: string) {
+        if (websiteId !== website.id) {
+          throw new Error("Unknown fixture website.");
+        }
+      },
+      async getCurrentPage() {
+        return page;
+      },
+      async captureScreenshot(fileName?: string) {
+        screenshots.push(fileName ?? "unnamed.png");
+        return fileName ?? "unnamed.png";
+      },
+    },
+    2_000,
+  );
+  return { browser, page, pages, screenshots };
 }

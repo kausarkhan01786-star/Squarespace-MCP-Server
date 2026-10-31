@@ -99,11 +99,12 @@ query strings and fragments and does not return input values. Screenshots are
 saved within the profile's `screenshots` directory.
 
 This service can navigate, inspect pages, switch among listed websites, and
-capture screenshots; it does not edit or publish website content.
+capture screenshots. Page-writing behavior is exposed separately through
+explicit MCP tools.
 
-## Pages inspection tools
+## Pages tools
 
-The MCP server registers these read-only tools:
+The MCP server registers these read-only inspection tools:
 
 - `list_websites` — list sites available in the manually authenticated account.
 - `list_pages` — return page IDs, names, page/folder types, URLs, navigation
@@ -122,7 +123,7 @@ Use page IDs returned from `list_pages` for `get_page_details`,
 structured JSON. If the persistent browser profile is not authenticated, the
 visible browser opens and the account owner must complete sign-in manually.
 
-The pages service uses DOM markers observed in the Squarespace interface:
+The inspection service uses DOM markers observed in the Squarespace interface:
 `[data-test="websiteCard"]`, `[data-test="pages-panel"]`,
 `[data-test="pages-panel-group"]`, and `[data-test="pages-panel-item"]`.
 It reads page title/slug/enabled status through the visible page settings
@@ -138,10 +139,30 @@ Squarespace does not expose an Enable Page checkbox for that item. Navigation
 group and enabled status are separate properties: a Not Linked page can still
 be enabled.
 
-All tools are marked read-only and do not create, edit, delete, save, or
+Inspection tools are marked read-only and do not create, edit, delete, save, or
 publish website content. Opening and closing page settings and temporarily
 expanding folders are used only to inspect existing page data; original
 collapsed folder states are restored afterward.
+
+### Page creation
+
+`create_page` is the first page-writing tool. It creates a blank `page` or
+`blog` in Main Navigation, Footer Navigation, or Not Linked. The page title
+and navigation title are set through the visible page-settings dialog. The
+tool captures before/after screenshots in the persistent profile's
+`screenshots` directory and returns their paths. It reports success only after
+reopening settings and confirming both titles persisted; it does not invoke a
+publish action. Template-based pages, folders, and the remaining management
+operations are not implemented yet.
+
+The creation flow was inspected in the live Pages panel. It uses the observed
+group-specific “Add a new page” controls (whose accessible titles differ
+slightly between Main Navigation and Not Linked),
+`[data-test="catalog-dialog"]`, `[data-test="add-blank-options-button"]`, and
+the blank Page/Blog options. Footer Navigation is used only when Squarespace
+exposes an unambiguous add control containing that exact group label. If these
+controls change or the resulting page cannot be uniquely identified and
+verified, the tool returns an explicit error rather than claiming success.
 
 ## Development
 
@@ -151,5 +172,6 @@ collapsed folder states are restored afterward.
 - `npm test` — run browser, Pages inspection, and MCP tool tests
 - `npm start` — run the compiled entry point
 
-Strict TypeScript checks are enabled in `tsconfig.json`. No Squarespace API
-calls are made by these inspection tools.
+Strict TypeScript checks are enabled in `tsconfig.json`. The inspection and
+creation tools use the visible Squarespace interface; no Squarespace API calls
+are made.

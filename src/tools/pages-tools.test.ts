@@ -7,7 +7,7 @@ import { SquarespacePagesService } from "../browser/squarespace-pages.service.js
 import type { WebsiteSummary } from "../browser/squarespace-browser.service.js";
 import { registerPagesTools } from "./pages-tools.js";
 
-test("registers the seven inspection tools as read-only and returns structured JSON", async () => {
+test("registers page tools with correct annotations and returns structured JSON", async () => {
   const website: WebsiteSummary = {
     id: "site-1",
     name: "Example site",
@@ -25,6 +25,9 @@ test("registers the seven inspection tools as read-only and returns structured J
     async getCurrentPage() {
       throw new Error("Page access is not expected in this registration test.");
     },
+    async captureScreenshot() {
+      return "fixture-screenshot.png";
+    },
   });
   const server = new McpServer({ name: "tool-registry-test", version: "1.0.0" });
   const client = new Client({ name: "tool-registry-test-client", version: "1.0.0" });
@@ -39,6 +42,7 @@ test("registers the seven inspection tools as read-only and returns structured J
     assert.deepEqual(
       listedTools.tools.map((tool) => tool.name).sort(),
       [
+        "create_page",
         "get_navigation_structure",
         "get_page_details",
         "get_page_url",
@@ -48,7 +52,25 @@ test("registers the seven inspection tools as read-only and returns structured J
         "list_websites",
       ],
     );
-    assert.ok(listedTools.tools.every((tool) => tool.annotations?.readOnlyHint === true));
+    const createPageTool = listedTools.tools.find((tool) => tool.name === "create_page");
+    assert.equal(createPageTool?.annotations?.readOnlyHint, false);
+    assert.equal(createPageTool?.annotations?.destructiveHint, false);
+    assert.ok(
+      listedTools.tools
+        .filter((tool) => tool.name !== "create_page")
+        .every((tool) => tool.annotations?.readOnlyHint === true),
+    );
+
+    const invalidCreateRequest = await client.callTool({
+      name: "create_page",
+      arguments: {
+        website_id: "site-1",
+        title: " ",
+        page_type: "folder",
+        navigation_group: "main_navigation",
+      },
+    });
+    assert.equal(invalidCreateRequest.isError, true);
 
     const result = await client.callTool({ name: "list_websites", arguments: {} });
     assert.deepEqual(result.structuredContent, { result: [website] });
