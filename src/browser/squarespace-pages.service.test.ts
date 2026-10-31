@@ -152,6 +152,22 @@ const createPageHtml = (persistTitles: boolean, groupLabel: string) => {
         document.querySelector('[role="menu"]').remove();
         return;
       }
+      if (target.matches('button[data-test="duplicate-page"]')) {
+        const name = activeRecord.pageTitle + ' (Copy)';
+        const copy = {
+          pageTitle: name,
+          navigationTitle: name,
+          slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+        };
+        records[name] = copy;
+        const row = document.createElement('div');
+        row.setAttribute('data-test', 'pages-panel-item');
+        row.innerHTML =
+          '<div><button aria-label="Page settings ' + name + '"></button></div>';
+        group.insertBefore(row, group.querySelector('button[title^="Add a new page to"]'));
+        target.closest('[role="dialog"]').remove();
+        return;
+      }
       if (target.matches('button[aria-label^="Page settings "]')) {
         const name = target.getAttribute('aria-label').slice('Page settings '.length);
         activeRecord = records[name] || activeRecord;
@@ -162,6 +178,7 @@ const createPageHtml = (persistTitles: boolean, groupLabel: string) => {
           '<label>Page Title<input aria-label="Page Title" value="' + activeRecord.pageTitle + '"></label>' +
           '<label>Navigation Title<input aria-label="Navigation Title" value="' + activeRecord.navigationTitle + '"></label>' +
           '<label>URL Slug<input aria-label="URL Slug" value="' + activeRecord.slug + '"></label>' +
+          '<button data-test="duplicate-page">Duplicate Page</button>' +
           '<button data-test="nav-modal-close-button">Close</button>';
         document.body.append(dialog);
         return;
@@ -265,6 +282,27 @@ test("creates a blank page, verifies saved titles, and captures before/after scr
       (await page.locator('[data-test="pages-panel-item"]').count()),
       2,
     );
+  } finally {
+    await browser.close();
+  }
+});
+
+test("duplicates a page and returns the verified copy", async () => {
+  const { browser, pages, screenshots } = await createPageFixture();
+  try {
+    const initialPages = await pages.listPages(website.id);
+    const source = initialPages.find((record) => record.name === "Existing");
+    assert.ok(source);
+
+    const result = await pages.duplicatePage(website.id, source.id);
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.sourcePageId, source.id);
+    assert.equal(result.page.name, "Existing (Copy)");
+    assert.notEqual(result.page.id, source.id);
+    assert.equal(screenshots.length, 2);
+    assert.match(result.screenshots.before, /^duplicate-page-before-.*\.png$/);
+    assert.match(result.screenshots.after, /^duplicate-page-after-.*\.png$/);
   } finally {
     await browser.close();
   }

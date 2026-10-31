@@ -164,6 +164,14 @@ observed Pages-panel path.
 normalizes the slug to lowercase and verifies both the saved setting and
 resulting site URL. Squarespace's homepage has a fixed root URL and is rejected.
 
+`duplicate_page` uses the observed Duplicate Page control, then verifies that a
+unique copy appears in the Pages panel before reporting success. It also
+captures and returns before/after screenshots. Folder duplication is rejected;
+other page types are supported when their settings dialog exposes the same
+duplicate control.
+
+`move_page`, `delete_page`, and `save_page_changes` are not implemented yet.
+
 The creation flow was inspected in the live Pages panel. It uses the observed
 group-specific “Add a new page” controls (whose accessible titles differ
 slightly between Main Navigation and Not Linked),

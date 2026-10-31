@@ -43,6 +43,7 @@ test("registers page tools with correct annotations and returns structured JSON"
       listedTools.tools.map((tool) => tool.name).sort(),
       [
         "create_page",
+        "duplicate_page",
         "get_navigation_structure",
         "get_page_details",
         "get_page_url",
@@ -57,6 +58,11 @@ test("registers page tools with correct annotations and returns structured JSON"
     const createPageTool = listedTools.tools.find((tool) => tool.name === "create_page");
     assert.equal(createPageTool?.annotations?.readOnlyHint, false);
     assert.equal(createPageTool?.annotations?.destructiveHint, false);
+    const duplicatePageTool = listedTools.tools.find(
+      (tool) => tool.name === "duplicate_page",
+    );
+    assert.equal(duplicatePageTool?.annotations?.readOnlyHint, false);
+    assert.equal(duplicatePageTool?.annotations?.destructiveHint, false);
     const updateTitleTool = listedTools.tools.find(
       (tool) => tool.name === "update_page_title",
     );
@@ -69,7 +75,12 @@ test("registers page tools with correct annotations and returns structured JSON"
       listedTools.tools
         .filter(
           (tool) =>
-            !["create_page", "update_page_title", "update_page_url"].includes(tool.name),
+            ![
+              "create_page",
+              "duplicate_page",
+              "update_page_title",
+              "update_page_url",
+            ].includes(tool.name),
         )
         .every((tool) => tool.annotations?.readOnlyHint === true),
     );

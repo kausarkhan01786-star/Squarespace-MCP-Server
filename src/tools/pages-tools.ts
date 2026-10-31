@@ -44,6 +44,12 @@ const pageCreationAnnotations = {
   idempotentHint: false,
   openWorldHint: false,
 } as const;
+const pageDuplicationAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
 const pageUpdateAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
@@ -78,6 +84,20 @@ export function registerPagesTools(
       runTool("create_page", () =>
         pages.createPage(website_id, title, page_type, navigation_group),
       ),
+  );
+
+  server.registerTool(
+      "duplicate_page",
+      {
+        description: "Duplicate a Squarespace page using its visible Page Settings control and verify the copy appears.",
+        inputSchema: pageInputSchema,
+        outputSchema,
+        annotations: pageDuplicationAnnotations,
+      },
+      async ({ website_id, page_id }) =>
+        runTool("duplicate_page", () =>
+          pages.duplicatePage(website_id, page_id),
+        ),
   );
 
   server.registerTool(

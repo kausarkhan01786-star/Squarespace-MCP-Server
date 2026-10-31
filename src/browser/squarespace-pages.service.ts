@@ -252,6 +252,131 @@ export class SquarespacePagesService {
     }
   }
 
+  async duplicatePage(
+    websiteId: string,
+    pageId: string,
+  ): Promise<{
+    success: true;
+    saved: true;
+    sourcePageId: string;
+    page: SquarespacePage;
+    screenshots: { before: string; after: string };
+  }> {
+    const website = this.browser.getWebsite(websiteId);
+    const initialPages = await this.readWebsitePages(websiteId);
+    const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
+    const target = initialPages[targetIndex];
+    if (!target) {
+      throw new SquarespaceBrowserError(
+        "PAGE_NOT_FOUND",
+        "The requested page ID was not found on this website. Refresh list_pages and use a returned page ID.",
+      );
+    }
+    if (target.type === "folder") {
+      throw new SquarespaceBrowserError(
+        "PAGE_DUPLICATION_FAILED",
+        "Folder duplication is not supported; select a Squarespace page instead.",
+      );
+    }
+
+    const page = await this.browser.getCurrentPage();
+    await this.waitForPagesPanel(page);
+    const screenshotId = randomUUID();
+    const beforeScreenshot = await this.browser.captureScreenshot(
+      `duplicate-page-before-${screenshotId}.png`,
+    );
+    const afterScreenshotName = `duplicate-page-after-${screenshotId}.png`;
+    const expandedFolderKeys: string[] = [];
+    let duplicateAttempted = false;
+    let afterScreenshotAttempted = false;
+
+    try {
+      await this.expandCollapsedFolders(page, expandedFolderKeys);
+      const currentItems = await this.readPanelItems(page);
+      const targetKey = pageItemKeys(currentItems)[targetIndex];
+      const expectedKey = JSON.stringify({
+        group: target.groupLabel,
+        path: [...target.parentPath, target.navigationTitle],
+      });
+      if (!currentItems[targetIndex] || targetKey !== expectedKey) {
+        throw new SquarespaceBrowserError(
+          "PAGE_NOT_FOUND",
+          "The selected page no longer matches its ID in the Pages panel. Refresh list_pages and retry.",
+        );
+      }
+
+      const row = page.locator(PAGE_ITEM_SELECTOR).nth(targetIndex);
+      await row.locator('button[aria-label^="Page settings "]').click();
+      const dialog = page.locator('[role="dialog"]').last();
+      await dialog.waitFor({ state: "visible", timeout: this.timeoutMs });
+      const duplicateButton = dialog.locator('[data-test="duplicate-page"]');
+      if ((await duplicateButton.count()) !== 1 || !(await duplicateButton.isEnabled())) {
+        throw new SquarespaceBrowserError(
+          "PAGE_DUPLICATION_FAILED",
+          "The selected page did not expose one enabled Duplicate Page control.",
+        );
+      }
+
+      duplicateAttempted = true;
+      await duplicateButton.click();
+      const createdItem = await this.waitForNewPage(page, currentItems);
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+      expandedFolderKeys.length = 0;
+
+      const updatedPages = await this.readWebsitePages(websiteId);
+      const matchingPages = updatedPages.filter(
+        (candidate) =>
+          candidate.type !== "folder" &&
+          candidate.groupLabel === createdItem.groupLabel &&
+          candidate.navigationTitle === createdItem.name &&
+          candidate.parentPath.length === target.parentPath.length &&
+          candidate.parentPath.every(
+            (segment, index) => segment === target.parentPath[index],
+          ),
+      );
+      if (matchingPages.length !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_DUPLICATION_FAILED",
+          "Squarespace did not confirm one uniquely identifiable duplicate in the Pages panel.",
+        );
+      }
+
+      afterScreenshotAttempted = true;
+      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      return {
+        success: true,
+        saved: true,
+        sourcePageId: pageId,
+        page: matchingPages[0]!,
+        screenshots: { before: beforeScreenshot, after: afterScreenshot },
+      };
+    } catch (error) {
+      if (duplicateAttempted && !afterScreenshotAttempted) {
+        afterScreenshotAttempted = true;
+        try {
+          await this.browser.captureScreenshot(afterScreenshotName);
+        } catch (screenshotError) {
+          throw new SquarespaceBrowserError(
+            "SCREENSHOT_FAILED",
+            "Duplication was not confirmed, and the post-operation screenshot also failed.",
+            { cause: new AggregateError([error, screenshotError]) },
+          );
+        }
+      }
+
+      if (error instanceof SquarespaceBrowserError) {
+        throw error;
+      }
+      throw new SquarespaceBrowserError(
+        "PAGE_DUPLICATION_FAILED",
+        "Squarespace did not confirm that the page was duplicated and saved.",
+        { cause: error },
+      );
+    } finally {
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+    }
+  }
+
   async updatePageTitle(
     websiteId: string,
     pageId: string,
@@ -703,7 +828,7 @@ export class SquarespacePagesService {
   private async waitForNewPage(
     page: Page,
     initialItems: RawPagePanelItem[],
-    groupLabel: string,
+    groupLabel?: string,
   ): Promise<RawPagePanelItem> {
     const initialKeys = pageItemKeys(initialItems);
     const initialCounts = countKeys(initialKeys);
@@ -716,7 +841,7 @@ export class SquarespacePagesService {
       const newKeys = new Set(
         currentItems.flatMap((item, index) => {
           const key = currentKeys[index];
-          return item.groupLabel === groupLabel &&
+          return (groupLabel === undefined || item.groupLabel === groupLabel) &&
             key !== undefined &&
             (currentCounts.get(key) ?? 0) > (initialCounts.get(key) ?? 0)
             ? [key]
