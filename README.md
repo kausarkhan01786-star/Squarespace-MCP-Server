@@ -160,6 +160,10 @@ reopening settings and confirming the new title. Use the returned `page` record
 for subsequent operations because page identifiers are derived from the
 observed Pages-panel path.
 
+`update_page_url` accepts a single URL-slug segment, not a full URL; it
+normalizes the slug to lowercase and verifies both the saved setting and
+resulting site URL. Squarespace's homepage has a fixed root URL and is rejected.
+
 The creation flow was inspected in the live Pages panel. It uses the observed
 group-specific “Add a new page” controls (whose accessible titles differ
 slightly between Main Navigation and Not Linked),

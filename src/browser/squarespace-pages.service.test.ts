@@ -182,6 +182,8 @@ const createPageHtml = (persistTitles: boolean, groupLabel: string) => {
         }
       } else if (input.getAttribute('aria-label') === 'Navigation Title') {
         if (persistTitles) activeRecord.navigationTitle = input.value;
+      } else if (input.getAttribute('aria-label') === 'URL Slug') {
+        if (persistTitles) activeRecord.slug = input.value;
       }
       const row = Array.from(document.querySelectorAll('[data-test="pages-panel-item"]'))
         .find(item => item.querySelector('button[aria-label^="Page settings ' + input.defaultValue + '"]'));
@@ -349,6 +351,58 @@ test("does not report an unsaved page-title update as successful", async () => {
       { code: "PAGE_UPDATE_FAILED" },
     );
     assert.equal(screenshots.length, 2);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("updates a page URL slug and verifies the resulting internal URL", async () => {
+  const { browser, pages, screenshots } = await createPageFixture();
+  try {
+    const initialPages = await pages.listPages(website.id);
+    const existing = initialPages.find((record) => record.name === "Existing");
+    assert.ok(existing);
+
+    const result = await pages.updatePageUrl(website.id, existing.id, "New-Location");
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.page.id, existing.id);
+    assert.equal(result.page.url, "https://fixture.squarespace.com/new-location");
+    assert.equal(screenshots.length, 2);
+    assert.match(result.screenshots.before, /^update-page-url-before-.*\.png$/);
+    assert.match(result.screenshots.after, /^update-page-url-after-.*\.png$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("does not report an unsaved page URL update as successful", async () => {
+  const { browser, pages, screenshots } = await createPageFixture(false);
+  try {
+    const initialPages = await pages.listPages(website.id);
+    const existing = initialPages.find((record) => record.name === "Existing");
+    assert.ok(existing);
+
+    await assert.rejects(
+      () => pages.updatePageUrl(website.id, existing.id, "unsaved-location"),
+      { code: "PAGE_URL_UPDATE_FAILED" },
+    );
+    assert.equal(screenshots.length, 2);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("rejects changing the Squarespace homepage's fixed URL", async () => {
+  const { browser, pages } = await createFixture();
+  try {
+    const records = await pages.listPages(website.id);
+    const home = records.find((record) => record.name === "Home");
+    assert.ok(home);
+    await assert.rejects(
+      () => pages.updatePageUrl(website.id, home.id, "home-path"),
+      { code: "PAGE_URL_UPDATE_FAILED" },
+    );
   } finally {
     await browser.close();
   }

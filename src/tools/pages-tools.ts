@@ -23,6 +23,15 @@ const createPageSchema = websiteIdSchema.extend({
 const updatePageTitleSchema = pageInputSchema.extend({
   title: z.string().trim().min(1).max(100).describe("New page title."),
 });
+const updatePageUrlSchema = pageInputSchema.extend({
+  url_slug: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/)
+    .describe("New single-segment URL slug; do not include a domain or path separators."),
+});
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -83,6 +92,20 @@ export function registerPagesTools(
         runTool("update_page_title", () =>
           pages.updatePageTitle(website_id, page_id, title),
         ),
+  );
+
+  server.registerTool(
+        "update_page_url",
+        {
+          description: "Update and verify a page's URL Slug. The Squarespace homepage's fixed root URL cannot be changed.",
+          inputSchema: updatePageUrlSchema,
+          outputSchema,
+          annotations: pageUpdateAnnotations,
+        },
+        async ({ website_id, page_id, url_slug }) =>
+          runTool("update_page_url", () =>
+            pages.updatePageUrl(website_id, page_id, url_slug),
+          ),
   );
 
   server.registerTool(

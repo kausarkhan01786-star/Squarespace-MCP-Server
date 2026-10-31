@@ -64,6 +64,20 @@ interface PageSettings {
 
 interface PageRecordInput extends RawPagePanelItem, PageSettings {}
 
+interface PageTextSettingUpdateOptions {
+  websiteId: string;
+  pageId: string;
+  fieldName: "Page Title" | "URL Slug";
+  value: string;
+  screenshotPrefix: string;
+  errorCode: "PAGE_UPDATE_FAILED" | "PAGE_URL_UPDATE_FAILED";
+  findUpdatedPages: (
+    target: SquarespacePage,
+    updatedPages: SquarespacePage[],
+  ) => SquarespacePage[];
+  validateTarget?: (target: SquarespacePage, website: WebsiteSummary) => void;
+}
+
 interface SquarespacePagesBrowser {
   listWebsites(): Promise<WebsiteSummary[]>;
   getWebsite(websiteId: string): WebsiteSummary;
@@ -257,123 +271,78 @@ export class SquarespacePagesService {
       );
     }
 
-    const website = this.browser.getWebsite(websiteId);
-    const initialPages = await this.readWebsitePages(websiteId);
-    const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
-    const target = initialPages[targetIndex];
-    if (!target) {
+    return this.updatePageTextSetting({
+      websiteId,
+      pageId,
+      fieldName: "Page Title",
+      value: normalizedTitle,
+      screenshotPrefix: "update-page-title",
+      errorCode: "PAGE_UPDATE_FAILED",
+      findUpdatedPages: (target, updatedPages) =>
+        updatedPages.filter(
+          (candidate) =>
+            candidate.name === normalizedTitle &&
+            candidate.groupLabel === target.groupLabel &&
+            candidate.parentPath.length === target.parentPath.length &&
+            candidate.parentPath.every(
+              (segment, index) => segment === target.parentPath[index],
+            ),
+        ),
+    });
+  }
+
+  async updatePageUrl(
+    websiteId: string,
+    pageId: string,
+    urlSlug: string,
+  ): Promise<{
+    success: true;
+    saved: true;
+    previousPageId: string;
+    page: SquarespacePage;
+    screenshots: { before: string; after: string };
+  }> {
+    const trimmedSlug = urlSlug.trim();
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(trimmedSlug)) {
       throw new SquarespaceBrowserError(
-        "PAGE_NOT_FOUND",
-        "The requested page ID was not found on this website. Refresh list_pages and use a returned page ID.",
+        "PAGE_URL_UPDATE_FAILED",
+        "URL slugs must be a single path segment containing letters, numbers, underscores, or hyphens.",
       );
     }
+    const normalizedSlug = trimmedSlug.toLowerCase();
 
-    const page = await this.browser.getCurrentPage();
-    await this.waitForPagesPanel(page);
-    const screenshotId = randomUUID();
-    const beforeScreenshot = await this.browser.captureScreenshot(
-      `update-page-title-before-${screenshotId}.png`,
-    );
-    const afterScreenshotName = `update-page-title-after-${screenshotId}.png`;
-    const expandedFolderKeys: string[] = [];
-    let updateAttempted = false;
-    let afterScreenshotAttempted = false;
-
-    try {
-      await this.expandCollapsedFolders(page, expandedFolderKeys);
-      const currentItems = await this.readPanelItems(page);
-      const targetKey = pageItemKeys(currentItems)[targetIndex];
-      const expectedKey = JSON.stringify({
-        group: target.groupLabel,
-        path: [...target.parentPath, target.navigationTitle],
-      });
-      if (!currentItems[targetIndex] || targetKey !== expectedKey) {
-        throw new SquarespaceBrowserError(
-          "PAGE_NOT_FOUND",
-          "The selected page no longer matches its ID in the Pages panel. Refresh list_pages and retry.",
-        );
-      }
-
-      const row = page.locator(PAGE_ITEM_SELECTOR).nth(targetIndex);
-      await row.locator('button[aria-label^="Page settings "]').click();
-      const dialog = page.locator('[role="dialog"]').last();
-      await dialog.waitFor({ state: "visible", timeout: this.timeoutMs });
-      const titleField = dialog.getByRole("textbox", { name: "Page Title" });
-      if ((await titleField.count()) !== 1) {
-        throw new SquarespaceBrowserError(
-          "PAGE_UPDATE_FAILED",
-          "The selected page did not expose the observed Page Title field.",
-        );
-      }
-
-      updateAttempted = true;
-      await titleField.fill(normalizedTitle);
-      await titleField.press("Tab");
-      await dialog.getByRole("button", { name: "Close", exact: true }).click();
-      await dialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
-
-      const savedSettings = await this.readPageSettings(page, row, target.type);
-      if (savedSettings.pageTitle !== normalizedTitle) {
-        throw new SquarespaceBrowserError(
-          "PAGE_UPDATE_FAILED",
-          "Squarespace did not confirm that the requested page title was saved.",
-        );
-      }
-
-      await this.restoreCollapsedFolders(page, expandedFolderKeys);
-      expandedFolderKeys.length = 0;
-
-      const updatedPages = await this.readWebsitePages(websiteId);
-      const matchingPages = updatedPages.filter(
-        (candidate) =>
-          candidate.name === normalizedTitle &&
-          candidate.groupLabel === target.groupLabel &&
-          candidate.parentPath.length === target.parentPath.length &&
-          candidate.parentPath.every(
-            (segment, index) => segment === target.parentPath[index],
-          ),
-      );
-      if (matchingPages.length !== 1) {
-        throw new SquarespaceBrowserError(
-          "PAGE_UPDATE_FAILED",
-          "Squarespace settings showed the new title, but the updated page could not be identified unambiguously in the Pages panel.",
-        );
-      }
-
-      afterScreenshotAttempted = true;
-      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
-      return {
-        success: true,
-        saved: true,
-        previousPageId: pageId,
-        page: matchingPages[0]!,
-        screenshots: { before: beforeScreenshot, after: afterScreenshot },
-      };
-    } catch (error) {
-      if (updateAttempted && !afterScreenshotAttempted) {
-        afterScreenshotAttempted = true;
-        try {
-          await this.browser.captureScreenshot(afterScreenshotName);
-        } catch (screenshotError) {
+    return this.updatePageTextSetting({
+      websiteId,
+      pageId,
+      fieldName: "URL Slug",
+      value: normalizedSlug,
+      screenshotPrefix: "update-page-url",
+      errorCode: "PAGE_URL_UPDATE_FAILED",
+      validateTarget: (target, website) => {
+        if (!target.url || new URL(target.url).pathname === "/") {
           throw new SquarespaceBrowserError(
-            "SCREENSHOT_FAILED",
-            "The title update was not confirmed, and the post-operation screenshot also failed.",
-            { cause: new AggregateError([error, screenshotError]) },
+            "PAGE_URL_UPDATE_FAILED",
+            "Squarespace's homepage has a fixed root URL, or this page does not expose a changeable URL slug.",
           );
         }
-      }
-
-      if (error instanceof SquarespaceBrowserError) {
-        throw error;
-      }
-      throw new SquarespaceBrowserError(
-        "PAGE_UPDATE_FAILED",
-        "Squarespace did not confirm that the requested page title was updated and saved.",
-        { cause: error },
-      );
-    } finally {
-      await this.restoreCollapsedFolders(page, expandedFolderKeys);
-    }
+        const websiteOrigin = new URL(website.url).origin;
+        if (new URL(target.url).origin !== websiteOrigin) {
+          throw new SquarespaceBrowserError(
+            "INVALID_URL",
+            "The selected page URL does not belong to the requested Squarespace website.",
+          );
+        }
+      },
+      findUpdatedPages: (target, updatedPages) => {
+        const expectedUrl = new URL(
+          `/${normalizedSlug}`,
+          new URL(this.browser.getWebsite(websiteId).url).origin,
+        ).toString();
+        return updatedPages.filter(
+          (candidate) => candidate.id === target.id && candidate.url === expectedUrl,
+        );
+      },
+    });
   }
 
   async listPages(
@@ -502,6 +471,130 @@ export class SquarespacePagesService {
       sections: sectionResult.sections,
       sectionsTruncated: sectionResult.totalCount > sectionResult.sections.length,
     };
+  }
+
+  private async updatePageTextSetting(
+    options: PageTextSettingUpdateOptions,
+  ): Promise<{
+    success: true;
+    saved: true;
+    previousPageId: string;
+    page: SquarespacePage;
+    screenshots: { before: string; after: string };
+  }> {
+    const website = this.browser.getWebsite(options.websiteId);
+    const initialPages = await this.readWebsitePages(options.websiteId);
+    const targetIndex = initialPages.findIndex((candidate) => candidate.id === options.pageId);
+    const target = initialPages[targetIndex];
+    if (!target) {
+      throw new SquarespaceBrowserError(
+        "PAGE_NOT_FOUND",
+        "The requested page ID was not found on this website. Refresh list_pages and use a returned page ID.",
+      );
+    }
+    options.validateTarget?.(target, website);
+
+    const page = await this.browser.getCurrentPage();
+    await this.waitForPagesPanel(page);
+    const screenshotId = randomUUID();
+    const beforeScreenshot = await this.browser.captureScreenshot(
+      `${options.screenshotPrefix}-before-${screenshotId}.png`,
+    );
+    const afterScreenshotName = `${options.screenshotPrefix}-after-${screenshotId}.png`;
+    const expandedFolderKeys: string[] = [];
+    let updateAttempted = false;
+    let afterScreenshotAttempted = false;
+
+    try {
+      await this.expandCollapsedFolders(page, expandedFolderKeys);
+      const currentItems = await this.readPanelItems(page);
+      const targetKey = pageItemKeys(currentItems)[targetIndex];
+      const expectedKey = JSON.stringify({
+        group: target.groupLabel,
+        path: [...target.parentPath, target.navigationTitle],
+      });
+      if (!currentItems[targetIndex] || targetKey !== expectedKey) {
+        throw new SquarespaceBrowserError(
+          "PAGE_NOT_FOUND",
+          "The selected page no longer matches its ID in the Pages panel. Refresh list_pages and retry.",
+        );
+      }
+
+      const row = page.locator(PAGE_ITEM_SELECTOR).nth(targetIndex);
+      await row.locator('button[aria-label^="Page settings "]').click();
+      const dialog = page.locator('[role="dialog"]').last();
+      await dialog.waitFor({ state: "visible", timeout: this.timeoutMs });
+      const field = dialog.getByRole("textbox", { name: options.fieldName });
+      if ((await field.count()) !== 1) {
+        throw new SquarespaceBrowserError(
+          options.errorCode,
+          `The selected page did not expose the observed ${options.fieldName} field.`,
+        );
+      }
+
+      updateAttempted = true;
+      await field.fill(options.value);
+      await field.press("Tab");
+      await dialog.getByRole("button", { name: "Close", exact: true }).click();
+      await dialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
+
+      const savedSettings = await this.readPageSettings(page, row, target.type);
+      const savedValue = options.fieldName === "Page Title"
+        ? savedSettings.pageTitle
+        : savedSettings.slug;
+      if (savedValue !== options.value) {
+        throw new SquarespaceBrowserError(
+          options.errorCode,
+          `Squarespace did not confirm that the requested ${options.fieldName} was saved.`,
+        );
+      }
+
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+      expandedFolderKeys.length = 0;
+
+      const updatedPages = await this.readWebsitePages(options.websiteId);
+      const matchingPages = options.findUpdatedPages(target, updatedPages);
+      if (matchingPages.length !== 1) {
+        throw new SquarespaceBrowserError(
+          options.errorCode,
+          `Squarespace settings showed the new ${options.fieldName}, but the updated page could not be identified unambiguously in the Pages panel.`,
+        );
+      }
+
+      afterScreenshotAttempted = true;
+      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      return {
+        success: true,
+        saved: true,
+        previousPageId: options.pageId,
+        page: matchingPages[0]!,
+        screenshots: { before: beforeScreenshot, after: afterScreenshot },
+      };
+    } catch (error) {
+      if (updateAttempted && !afterScreenshotAttempted) {
+        afterScreenshotAttempted = true;
+        try {
+          await this.browser.captureScreenshot(afterScreenshotName);
+        } catch (screenshotError) {
+          throw new SquarespaceBrowserError(
+            "SCREENSHOT_FAILED",
+            `The ${options.fieldName} update was not confirmed, and the post-operation screenshot also failed.`,
+            { cause: new AggregateError([error, screenshotError]) },
+          );
+        }
+      }
+
+      if (error instanceof SquarespaceBrowserError) {
+        throw error;
+      }
+      throw new SquarespaceBrowserError(
+        options.errorCode,
+        `Squarespace did not confirm that the requested ${options.fieldName} was updated and saved.`,
+        { cause: error },
+      );
+    } finally {
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+    }
   }
 
   private async readWebsitePages(websiteId: string): Promise<SquarespacePage[]> {
