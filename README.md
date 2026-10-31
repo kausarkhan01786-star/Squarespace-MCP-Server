@@ -170,7 +170,16 @@ captures and returns before/after screenshots. Folder duplication is rejected;
 other page types are supported when their settings dialog exposes the same
 duplicate control.
 
-`move_page`, `delete_page`, and `save_page_changes` are not implemented yet.
+`move_page` moves a page to Main Navigation, Footer Navigation, Not Linked, or
+an existing folder in the selected group. It captures before/after screenshots
+and verifies the page's resulting group and parent path before reporting
+success. Use the current page and folder IDs returned by `list_pages`; IDs
+change when a page's group or parent path changes. Moving folders and reordering
+within the same location are not supported. The drag-and-drop flow is covered
+by Playwright fixtures for group and folder destinations; it has not been
+executed against a live website.
+
+`delete_page` and `save_page_changes` are not implemented yet.
 
 The creation flow was inspected in the live Pages panel. It uses the observed
 group-specific “Add a new page” controls (whose accessible titles differ

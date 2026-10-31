@@ -51,6 +51,7 @@ test("registers page tools with correct annotations and returns structured JSON"
         "list_not_linked_pages",
         "list_pages",
         "list_websites",
+        "move_page",
         "update_page_title",
         "update_page_url",
       ],
@@ -63,6 +64,9 @@ test("registers page tools with correct annotations and returns structured JSON"
     );
     assert.equal(duplicatePageTool?.annotations?.readOnlyHint, false);
     assert.equal(duplicatePageTool?.annotations?.destructiveHint, false);
+    const movePageTool = listedTools.tools.find((tool) => tool.name === "move_page");
+    assert.equal(movePageTool?.annotations?.readOnlyHint, false);
+    assert.equal(movePageTool?.annotations?.destructiveHint, false);
     const updateTitleTool = listedTools.tools.find(
       (tool) => tool.name === "update_page_title",
     );
@@ -78,6 +82,7 @@ test("registers page tools with correct annotations and returns structured JSON"
             ![
               "create_page",
               "duplicate_page",
+              "move_page",
               "update_page_title",
               "update_page_url",
             ].includes(tool.name),
@@ -113,6 +118,15 @@ test("registers page tools with correct annotations and returns structured JSON"
       },
     });
     assert.equal(invalidUrlRequest.isError, true);
+    const invalidMoveRequest = await client.callTool({
+      name: "move_page",
+      arguments: {
+        website_id: "site-1",
+        page_id: "page-1",
+        destination_group: "unknown",
+      },
+    });
+    assert.equal(invalidMoveRequest.isError, true);
 
     const result = await client.callTool({ name: "list_websites", arguments: {} });
     assert.deepEqual(result.structuredContent, { result: [website] });

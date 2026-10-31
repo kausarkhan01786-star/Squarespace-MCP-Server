@@ -32,6 +32,17 @@ const updatePageUrlSchema = pageInputSchema.extend({
     .regex(/^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/)
     .describe("New single-segment URL slug; do not include a domain or path separators."),
 });
+const movePageSchema = pageInputSchema.extend({
+  destination_group: z
+    .enum(["main_navigation", "footer_navigation", "not_linked"])
+    .describe("Navigation group where the page should be moved."),
+  destination_folder_id: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe("Optional folder ID in the destination group."),
+});
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -45,6 +56,12 @@ const pageCreationAnnotations = {
   openWorldHint: false,
 } as const;
 const pageDuplicationAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+const pageMoveAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: false,
@@ -87,45 +104,64 @@ export function registerPagesTools(
   );
 
   server.registerTool(
-      "duplicate_page",
-      {
-        description: "Duplicate a Squarespace page using its visible Page Settings control and verify the copy appears.",
-        inputSchema: pageInputSchema,
-        outputSchema,
-        annotations: pageDuplicationAnnotations,
-      },
-      async ({ website_id, page_id }) =>
-        runTool("duplicate_page", () =>
-          pages.duplicatePage(website_id, page_id),
-        ),
+    "duplicate_page",
+    {
+      description: "Duplicate a Squarespace page using its visible Page Settings control and verify the copy appears.",
+      inputSchema: pageInputSchema,
+      outputSchema,
+      annotations: pageDuplicationAnnotations,
+    },
+    async ({ website_id, page_id }) =>
+      runTool("duplicate_page", () =>
+        pages.duplicatePage(website_id, page_id),
+      ),
   );
 
   server.registerTool(
-      "update_page_title",
-      {
-        description: "Update and verify a Squarespace page title without changing its navigation title or invoking publish.",
-        inputSchema: updatePageTitleSchema,
-        outputSchema,
-        annotations: pageUpdateAnnotations,
-      },
-      async ({ website_id, page_id, title }) =>
-        runTool("update_page_title", () =>
-          pages.updatePageTitle(website_id, page_id, title),
+    "move_page",
+    {
+      description: "Move a Squarespace page to a navigation group or folder using the visible Pages-panel drag-and-drop controls.",
+      inputSchema: movePageSchema,
+      outputSchema,
+      annotations: pageMoveAnnotations,
+    },
+    async ({ website_id, page_id, destination_group, destination_folder_id }) =>
+      runTool("move_page", () =>
+        pages.movePage(
+          website_id,
+          page_id,
+          destination_group,
+          destination_folder_id,
         ),
+      ),
   );
 
   server.registerTool(
-        "update_page_url",
-        {
-          description: "Update and verify a page's URL Slug. The Squarespace homepage's fixed root URL cannot be changed.",
-          inputSchema: updatePageUrlSchema,
-          outputSchema,
-          annotations: pageUpdateAnnotations,
-        },
-        async ({ website_id, page_id, url_slug }) =>
-          runTool("update_page_url", () =>
-            pages.updatePageUrl(website_id, page_id, url_slug),
-          ),
+    "update_page_title",
+    {
+      description: "Update and verify a Squarespace page title without changing its navigation title or invoking publish.",
+      inputSchema: updatePageTitleSchema,
+      outputSchema,
+      annotations: pageUpdateAnnotations,
+    },
+    async ({ website_id, page_id, title }) =>
+      runTool("update_page_title", () =>
+        pages.updatePageTitle(website_id, page_id, title),
+      ),
+  );
+
+  server.registerTool(
+    "update_page_url",
+    {
+      description: "Update and verify a page's URL Slug. The Squarespace homepage's fixed root URL cannot be changed.",
+      inputSchema: updatePageUrlSchema,
+      outputSchema,
+      annotations: pageUpdateAnnotations,
+    },
+    async ({ website_id, page_id, url_slug }) =>
+      runTool("update_page_url", () =>
+        pages.updatePageUrl(website_id, page_id, url_slug),
+      ),
   );
 
   server.registerTool(

@@ -377,6 +377,211 @@ export class SquarespacePagesService {
     }
   }
 
+  async movePage(
+    websiteId: string,
+    pageId: string,
+    destinationGroup: PageCreationGroup,
+    destinationFolderId?: string,
+  ): Promise<{
+    success: true;
+    saved: true;
+    previousPageId: string;
+    page: SquarespacePage;
+    screenshots: { before: string; after: string };
+  }> {
+    const website = this.browser.getWebsite(websiteId);
+    const initialPages = await this.readWebsitePages(websiteId);
+    const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
+    const target = initialPages[targetIndex];
+    if (!target) {
+      throw new SquarespaceBrowserError(
+        "PAGE_NOT_FOUND",
+        "The requested page ID was not found on this website. Refresh list_pages and use a returned page ID.",
+      );
+    }
+    if (target.type === "folder") {
+      throw new SquarespaceBrowserError(
+        "PAGE_MOVE_FAILED",
+        "Folder movement is not supported by this tool; select a page instead.",
+      );
+    }
+
+    const destinationFolder = destinationFolderId
+      ? initialPages.find((candidate) => candidate.id === destinationFolderId)
+      : undefined;
+    if (destinationFolderId && !destinationFolder) {
+      throw new SquarespaceBrowserError(
+        "PAGE_NOT_FOUND",
+        "The destination folder ID was not found. Refresh list_pages and use a returned folder ID.",
+      );
+    }
+    if (destinationFolder && destinationFolder.type !== "folder") {
+      throw new SquarespaceBrowserError(
+        "PAGE_MOVE_FAILED",
+        "The destination_page_id must identify a Squarespace folder.",
+      );
+    }
+    if (destinationFolder && destinationFolder.group !== destinationGroup) {
+      throw new SquarespaceBrowserError(
+        "PAGE_MOVE_FAILED",
+        "The destination folder must belong to the requested navigation group.",
+      );
+    }
+
+    const destinationParentPath = destinationFolder
+      ? [...destinationFolder.parentPath, destinationFolder.navigationTitle]
+      : [];
+    if (
+      target.group === destinationGroup &&
+      target.parentPath.length === destinationParentPath.length &&
+      target.parentPath.every(
+        (segment, index) => segment === destinationParentPath[index],
+      )
+    ) {
+      throw new SquarespaceBrowserError(
+        "PAGE_MOVE_FAILED",
+        "The page is already in that location. Reordering within the same location is not supported.",
+      );
+    }
+
+    const page = await this.browser.getCurrentPage();
+    await this.waitForPagesPanel(page);
+    const screenshotId = randomUUID();
+    const beforeScreenshot = await this.browser.captureScreenshot(
+      `move-page-before-${screenshotId}.png`,
+    );
+    const afterScreenshotName = `move-page-after-${screenshotId}.png`;
+    const expandedFolderKeys: string[] = [];
+    let moveAttempted = false;
+    let afterScreenshotAttempted = false;
+
+    try {
+      await this.expandCollapsedFolders(page, expandedFolderKeys);
+      const currentItems = await this.readPanelItems(page);
+      const sourceItem = currentItems[targetIndex];
+      const sourceKey = pageItemKeys(currentItems)[targetIndex];
+      const expectedSourceKey = JSON.stringify({
+        group: target.groupLabel,
+        path: [...target.parentPath, target.navigationTitle],
+      });
+      if (!sourceItem || sourceKey !== expectedSourceKey) {
+        throw new SquarespaceBrowserError(
+          "PAGE_NOT_FOUND",
+          "The selected page no longer matches its ID in the Pages panel. Refresh list_pages and retry.",
+        );
+      }
+
+      const sourceHandle = page
+        .locator(PAGE_ITEM_SELECTOR)
+        .nth(targetIndex)
+        .locator('[tabindex="0"]')
+        .first();
+      let destination: ReturnType<Page["locator"]>;
+      if (destinationFolder) {
+        const folderIndex = initialPages.findIndex(
+          (candidate) => candidate.id === destinationFolder.id,
+        );
+        destination = page
+          .locator(PAGE_ITEM_SELECTOR)
+          .nth(folderIndex)
+          .locator('[tabindex="0"]')
+          .first();
+      } else {
+        const groupLabel = navigationGroupLabel(destinationGroup);
+        const headings = page.locator(`${GROUP_SELECTOR} h2`);
+        const matchingHeadingIndices = await headings.evaluateAll(
+          (elements, expectedLabel) =>
+            elements.flatMap((heading, index) =>
+              (heading.textContent || "").trim() === expectedLabel ? [index] : [],
+            ),
+          groupLabel,
+        );
+        if (matchingHeadingIndices.length !== 1) {
+          throw new SquarespaceBrowserError(
+            "PAGE_MOVE_FAILED",
+            `Squarespace did not expose one unambiguous ${groupLabel} drop target.`,
+          );
+        }
+        destination = headings.nth(matchingHeadingIndices[0]!);
+      }
+      if ((await sourceHandle.count()) !== 1 || (await destination.count()) !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_MOVE_FAILED",
+          "Squarespace did not expose unambiguous source and destination controls for this move.",
+        );
+      }
+
+      moveAttempted = true;
+      await sourceHandle.dragTo(destination, { steps: 10 });
+      const expectedGroupLabel = navigationGroupLabel(destinationGroup);
+      const expectedPath = [...destinationParentPath, sourceItem.name];
+      await this.waitForPageAtPath(
+        page,
+        expectedGroupLabel,
+        expectedPath,
+        target.groupLabel,
+        [...target.parentPath, sourceItem.name],
+      );
+
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+      expandedFolderKeys.length = 0;
+      const updatedPages = await this.readWebsitePages(websiteId);
+      const matchingPages = updatedPages.filter(
+        (candidate) =>
+          candidate.type !== "folder" &&
+          candidate.groupLabel === expectedGroupLabel &&
+          candidate.navigationTitle === sourceItem.name &&
+          candidate.parentPath.length === destinationParentPath.length &&
+          candidate.parentPath.every(
+            (segment, index) => segment === destinationParentPath[index],
+          ),
+      );
+      if (
+        matchingPages.length !== 1 ||
+        updatedPages.some((candidate) => candidate.id === pageId)
+      ) {
+        throw new SquarespaceBrowserError(
+          "PAGE_MOVE_FAILED",
+          "Squarespace did not confirm that the original page was moved to one unique destination.",
+        );
+      }
+
+      afterScreenshotAttempted = true;
+      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      return {
+        success: true,
+        saved: true,
+        previousPageId: pageId,
+        page: matchingPages[0]!,
+        screenshots: { before: beforeScreenshot, after: afterScreenshot },
+      };
+    } catch (error) {
+      if (moveAttempted && !afterScreenshotAttempted) {
+        afterScreenshotAttempted = true;
+        try {
+          await this.browser.captureScreenshot(afterScreenshotName);
+        } catch (screenshotError) {
+          throw new SquarespaceBrowserError(
+            "SCREENSHOT_FAILED",
+            "The move was not confirmed, and the post-operation screenshot also failed.",
+            { cause: new AggregateError([error, screenshotError]) },
+          );
+        }
+      }
+
+      if (error instanceof SquarespaceBrowserError) {
+        throw error;
+      }
+      throw new SquarespaceBrowserError(
+        "PAGE_MOVE_FAILED",
+        "Squarespace did not confirm that the page was moved and saved.",
+        { cause: error },
+      );
+    } finally {
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+    }
+  }
+
   async updatePageTitle(
     websiteId: string,
     pageId: string,
@@ -884,6 +1089,42 @@ export class SquarespacePagesService {
     throw new SquarespaceBrowserError(
       "PAGE_CREATION_FAILED",
       "Squarespace did not confirm a new page row before the operation timed out.",
+    );
+  }
+
+  private async waitForPageAtPath(
+    page: Page,
+    destinationGroup: string,
+    destinationPath: string[],
+    sourceGroup: string,
+    sourcePath: string[],
+  ): Promise<void> {
+    const destinationKey = JSON.stringify({
+      group: destinationGroup,
+      path: destinationPath,
+    });
+    const sourceKey = JSON.stringify({ group: sourceGroup, path: sourcePath });
+    const deadline = Date.now() + this.timeoutMs;
+
+    while (Date.now() < deadline) {
+      const currentKeys = pageItemKeys(await this.readPanelItems(page));
+      const destinationCount = currentKeys.filter((key) => key === destinationKey).length;
+      const sourceCount = currentKeys.filter((key) => key === sourceKey).length;
+      if (destinationCount > 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_MOVE_FAILED",
+          "The destination already contains an indistinguishable page; the move cannot be verified safely.",
+        );
+      }
+      if (destinationCount === 1 && sourceCount === 0) {
+        return;
+      }
+      await delay(150);
+    }
+
+    throw new SquarespaceBrowserError(
+      "PAGE_MOVE_FAILED",
+      "The page did not appear at the requested destination before the operation timed out.",
     );
   }
 

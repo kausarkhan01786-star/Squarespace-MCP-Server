@@ -93,6 +93,84 @@ const pagesPanelHtml = `<!doctype html>
   </script>
 </body></html>`;
 
+const movePageHtml = `<!doctype html>
+<html><body>
+  <div data-test="pages-panel">
+    <section>
+      <div data-test="pages-panel-group"><h2>Main Navigation</h2></div>
+      <div data-test="pages-panel-item">
+        <div>
+          <div tabindex="0">Existing</div>
+          <button aria-label="Page settings Existing"></button>
+        </div>
+      </div>
+      <div data-test="pages-panel-item">
+        <div>
+          <div tabindex="0">Target Folder</div>
+          <button aria-label="Page settings Target Folder"></button>
+          <button aria-label="Expand child pages Target Folder" aria-expanded="false"></button>
+          <div data-fixture-children hidden></div>
+        </div>
+      </div>
+    </section>
+    <section>
+      <div data-test="pages-panel-group"><h2>Not Linked</h2></div>
+    </section>
+  </div>
+  <script>
+    const records = {
+      Existing: { pageTitle: 'Existing', navigationTitle: 'Existing', slug: 'existing' },
+      'Target Folder': { pageTitle: 'Target Folder', navigationTitle: 'Target Folder', slug: '' }
+    };
+    let activeRecord = null;
+    let movingRow = null;
+    document.addEventListener('pointerdown', event => {
+      const target = event.target instanceof Element ? event.target : null;
+      movingRow = target?.matches('[tabindex="0"]')
+        ? target.closest('[data-test="pages-panel-item"]')
+        : null;
+    });
+    document.addEventListener('pointerup', event => {
+      const target = event.target instanceof Element ? event.target : null;
+      const destination = target?.closest('section');
+      const destinationFolder = target?.closest('[data-test="pages-panel-item"]');
+      const folderChildren = destinationFolder?.querySelector('[data-fixture-children]');
+      if (movingRow && folderChildren) {
+        folderChildren.append(movingRow);
+      } else if (movingRow && destination) {
+        destination.append(movingRow);
+      }
+      movingRow = null;
+    });
+    document.addEventListener('click', event => {
+      const target = event.target instanceof Element
+        ? event.target.closest('button')
+        : null;
+      if (!target) return;
+      const folderButton = target.closest('button[aria-label^="Expand child pages "], button[aria-label^="Collapse child pages "]');
+      if (folderButton) {
+        const expanded = folderButton.getAttribute('aria-expanded') === 'true';
+        folderButton.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        folderButton.parentElement.querySelector('[data-fixture-children]').hidden = expanded;
+        return;
+      }
+      if (!target.matches('button[aria-label^="Page settings "]')) return;
+      const name = target.getAttribute('aria-label').slice('Page settings '.length);
+      activeRecord = records[name];
+      const dialog = document.createElement('div');
+      dialog.setAttribute('role', 'dialog');
+      dialog.innerHTML =
+        '<h1>' + (name === 'Target Folder' ? 'Configure Dropdown' : 'Page Settings') + '</h1>' +
+        '<label>Page Title<input aria-label="Page Title" value="' + activeRecord.pageTitle + '"></label>' +
+        '<label>Navigation Title<input aria-label="Navigation Title" value="' + activeRecord.navigationTitle + '"></label>' +
+        '<label>URL Slug<input aria-label="URL Slug" value="' + activeRecord.slug + '"></label>' +
+        '<button data-test="nav-modal-close-button">Close</button>';
+      dialog.querySelector('button').addEventListener('click', () => dialog.remove());
+      document.body.append(dialog);
+    });
+  </script>
+</body></html>`;
+
 const createPageHtml = (persistTitles: boolean, groupLabel: string) => {
   const addButtonTitle = groupLabel === "Not Linked"
     ? `Add a new page to the "${groupLabel}" navigation group`
@@ -303,6 +381,58 @@ test("duplicates a page and returns the verified copy", async () => {
     assert.equal(screenshots.length, 2);
     assert.match(result.screenshots.before, /^duplicate-page-before-.*\.png$/);
     assert.match(result.screenshots.after, /^duplicate-page-after-.*\.png$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("moves a page to another navigation group and verifies its location", async () => {
+  const { browser, pages, screenshots } = await createMoveFixture();
+  try {
+    const initialPages = await pages.listPages(website.id);
+    const existing = initialPages.find((record) => record.name === "Existing");
+    assert.ok(existing);
+
+    const result = await pages.movePage(
+      website.id,
+      existing.id,
+      "not_linked",
+    );
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.previousPageId, existing.id);
+    assert.equal(result.page.group, "not_linked");
+    assert.notEqual(result.page.id, existing.id);
+    assert.equal(screenshots.length, 2);
+    assert.match(result.screenshots.before, /^move-page-before-.*\.png$/);
+    assert.match(result.screenshots.after, /^move-page-after-.*\.png$/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("moves a page into an expanded Squarespace folder", async () => {
+  const { browser, pages, screenshots } = await createMoveFixture();
+  try {
+    const initialPages = await pages.listPages(website.id);
+    const existing = initialPages.find((record) => record.name === "Existing");
+    const folder = initialPages.find((record) => record.name === "Target Folder");
+    assert.ok(existing);
+    assert.ok(folder);
+    assert.equal(folder.type, "folder");
+
+    const result = await pages.movePage(
+      website.id,
+      existing.id,
+      "main_navigation",
+      folder.id,
+    );
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.page.group, "main_navigation");
+    assert.deepEqual(result.page.parentPath, ["Target Folder"]);
+    assert.notEqual(result.page.id, existing.id);
+    assert.equal(screenshots.length, 2);
   } finally {
     await browser.close();
   }
@@ -558,4 +688,47 @@ async function createPageFixture(
     2_000,
   );
   return { browser, page, pages, screenshots };
+}
+
+async function createMoveFixture(): Promise<{
+  browser: Browser;
+  pages: SquarespacePagesService;
+  screenshots: string[];
+}> {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const screenshots: string[] = [];
+  let initialized = false;
+  const pages = new SquarespacePagesService(
+    {
+      async listWebsites() {
+        return [website];
+      },
+      getWebsite(websiteId: string) {
+        if (websiteId !== website.id) {
+          throw new Error("Unknown fixture website.");
+        }
+        return website;
+      },
+      async openWebsitePages(websiteId: string) {
+        if (websiteId !== website.id) {
+          throw new Error("Unknown fixture website.");
+        }
+        if (!initialized) {
+          await page.setContent(movePageHtml);
+          initialized = true;
+        }
+      },
+      async openWebsiteUrl() {},
+      async getCurrentPage() {
+        return page;
+      },
+      async captureScreenshot(fileName?: string) {
+        screenshots.push(fileName ?? "unnamed.png");
+        return fileName ?? "unnamed.png";
+      },
+    },
+    2_000,
+  );
+  return { browser, pages, screenshots };
 }
