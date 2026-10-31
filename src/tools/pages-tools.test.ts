@@ -43,6 +43,7 @@ test("registers page tools with correct annotations and returns structured JSON"
       listedTools.tools.map((tool) => tool.name).sort(),
       [
         "create_page",
+        "delete_page",
         "duplicate_page",
         "get_navigation_structure",
         "get_page_details",
@@ -52,6 +53,7 @@ test("registers page tools with correct annotations and returns structured JSON"
         "list_pages",
         "list_websites",
         "move_page",
+        "save_page_changes",
         "update_page_title",
         "update_page_url",
       ],
@@ -67,6 +69,14 @@ test("registers page tools with correct annotations and returns structured JSON"
     const movePageTool = listedTools.tools.find((tool) => tool.name === "move_page");
     assert.equal(movePageTool?.annotations?.readOnlyHint, false);
     assert.equal(movePageTool?.annotations?.destructiveHint, false);
+    const deletePageTool = listedTools.tools.find((tool) => tool.name === "delete_page");
+    assert.equal(deletePageTool?.annotations?.readOnlyHint, false);
+    assert.equal(deletePageTool?.annotations?.destructiveHint, true);
+    const savePageChangesTool = listedTools.tools.find(
+      (tool) => tool.name === "save_page_changes",
+    );
+    assert.equal(savePageChangesTool?.annotations?.readOnlyHint, false);
+    assert.equal(savePageChangesTool?.annotations?.destructiveHint, false);
     const updateTitleTool = listedTools.tools.find(
       (tool) => tool.name === "update_page_title",
     );
@@ -81,8 +91,10 @@ test("registers page tools with correct annotations and returns structured JSON"
           (tool) =>
             ![
               "create_page",
+              "delete_page",
               "duplicate_page",
               "move_page",
+              "save_page_changes",
               "update_page_title",
               "update_page_url",
             ].includes(tool.name),
@@ -127,6 +139,14 @@ test("registers page tools with correct annotations and returns structured JSON"
       },
     });
     assert.equal(invalidMoveRequest.isError, true);
+    const invalidPublishRequest = await client.callTool({
+      name: "save_page_changes",
+      arguments: {
+        website_id: "site-1",
+        publish: true,
+      },
+    });
+    assert.equal(invalidPublishRequest.isError, true);
 
     const result = await client.callTool({ name: "list_websites", arguments: {} });
     assert.deepEqual(result.structuredContent, { result: [website] });

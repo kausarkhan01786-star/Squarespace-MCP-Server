@@ -9,6 +9,7 @@ const PAGES_PANEL_SELECTOR = '[data-test="pages-panel"]';
 const PAGE_ITEM_SELECTOR = '[data-test="pages-panel-item"]';
 const GROUP_SELECTOR = '[data-test="pages-panel-group"]';
 const SECTION_SELECTOR = '[data-test="page-section"]';
+const EDITOR_ACTION_SELECTOR = 'button, [role="button"]';
 const MAX_SECTIONS = 50;
 const MAX_SECTION_TEXT_LENGTH = 4_000;
 
@@ -63,6 +64,19 @@ interface PageSettings {
 }
 
 interface PageRecordInput extends RawPagePanelItem, PageSettings {}
+
+interface EditorControl {
+  index: number;
+  text: string;
+  ariaLabel: string | null;
+  disabled: boolean;
+}
+
+interface EditorInspection {
+  controls: EditorControl[];
+  visibleText: string;
+  url: string;
+}
 
 interface PageTextSettingUpdateOptions {
   websiteId: string;
@@ -582,6 +596,277 @@ export class SquarespacePagesService {
     }
   }
 
+  async deletePage(
+    websiteId: string,
+    pageId: string,
+    confirmation: "DELETE",
+  ): Promise<{
+    success: true;
+    saved: true;
+    deletedPageId: string;
+    screenshots: { before: string; after: string };
+  }> {
+    if (confirmation !== "DELETE") {
+      throw new SquarespaceBrowserError(
+        "CONFIRMATION_REQUIRED",
+        "Deleting a page requires the explicit DELETE confirmation.",
+      );
+    }
+
+    const website = this.browser.getWebsite(websiteId);
+    const initialPages = await this.readWebsitePages(websiteId);
+    const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
+    const target = initialPages[targetIndex];
+    if (!target) {
+      throw new SquarespaceBrowserError(
+        "PAGE_NOT_FOUND",
+        "The requested page ID was not found on this website. Refresh list_pages and use a returned page ID.",
+      );
+    }
+    if (target.type === "folder") {
+      throw new SquarespaceBrowserError(
+        "PAGE_DELETE_FAILED",
+        "Deleting folders is not supported because it may also remove nested pages.",
+      );
+    }
+    if (target.url && new URL(target.url).pathname === "/") {
+      throw new SquarespaceBrowserError(
+        "PAGE_DELETE_FAILED",
+        "The Squarespace homepage cannot be deleted while it is assigned as the homepage.",
+      );
+    }
+
+    const page = await this.browser.getCurrentPage();
+    await this.waitForPagesPanel(page);
+    const screenshotId = randomUUID();
+    const beforeScreenshot = await this.browser.captureScreenshot(
+      `delete-page-before-${screenshotId}.png`,
+    );
+    const afterScreenshotName = `delete-page-after-${screenshotId}.png`;
+    const expandedFolderKeys: string[] = [];
+    let deleteAttempted = false;
+    let afterScreenshotAttempted = false;
+
+    try {
+      await this.expandCollapsedFolders(page, expandedFolderKeys);
+      const currentItems = await this.readPanelItems(page);
+      const currentKeys = pageItemKeys(currentItems);
+      const targetKey = currentKeys[targetIndex];
+      const expectedKey = JSON.stringify({
+        group: target.groupLabel,
+        path: [...target.parentPath, target.navigationTitle],
+      });
+      if (!currentItems[targetIndex] || targetKey !== expectedKey) {
+        throw new SquarespaceBrowserError(
+          "PAGE_NOT_FOUND",
+          "The selected page no longer matches its ID in the Pages panel. Refresh list_pages and retry.",
+        );
+      }
+      if (currentKeys.filter((key) => key === targetKey).length !== 1) {
+        throw new SquarespaceBrowserError(
+          "PAGE_DELETE_FAILED",
+          "The selected page is indistinguishable from another Pages-panel item; deletion was not attempted.",
+        );
+      }
+
+      const row = page.locator(PAGE_ITEM_SELECTOR).nth(targetIndex);
+      const deleteButton = row.locator('button[data-test="delete-item"]');
+      if ((await deleteButton.count()) !== 1 || !(await deleteButton.isEnabled())) {
+        throw new SquarespaceBrowserError(
+          "PAGE_DELETE_FAILED",
+          "The selected page did not expose one enabled observed Delete Page control.",
+        );
+      }
+
+      deleteAttempted = true;
+      page.once("dialog", async (dialog) => {
+        if (dialog.type() === "confirm") {
+          await dialog.accept();
+        } else {
+          await dialog.dismiss();
+        }
+      });
+      await deleteButton.click();
+
+      const confirmationDialog = page.getByRole("dialog").last();
+      const dialogAppeared = await confirmationDialog
+        .waitFor({ state: "visible", timeout: Math.min(2_000, this.timeoutMs) })
+        .then(() => true)
+        .catch(() => false);
+      if (dialogAppeared) {
+        const confirmButton = confirmationDialog.getByRole("button", {
+          name: "Delete",
+          exact: true,
+        });
+        if ((await confirmButton.count()) !== 1 || !(await confirmButton.isEnabled())) {
+          throw new SquarespaceBrowserError(
+            "PAGE_DELETE_FAILED",
+            "Squarespace opened a delete confirmation that did not expose one unambiguous enabled Delete button.",
+          );
+        }
+        await confirmButton.click();
+        await confirmationDialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
+      }
+
+      await this.waitForDeletedPage(page, targetKey);
+      const updatedPages = await this.readWebsitePages(websiteId);
+      if (updatedPages.some((candidate) => candidate.id === pageId)) {
+        throw new SquarespaceBrowserError(
+          "PAGE_DELETE_FAILED",
+          "Squarespace did not confirm that the selected page was removed from the Pages panel.",
+        );
+      }
+
+      afterScreenshotAttempted = true;
+      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      return {
+        success: true,
+        saved: true,
+        deletedPageId: pageId,
+        screenshots: { before: beforeScreenshot, after: afterScreenshot },
+      };
+    } catch (error) {
+      if (deleteAttempted && !afterScreenshotAttempted) {
+        afterScreenshotAttempted = true;
+        try {
+          await this.browser.captureScreenshot(afterScreenshotName);
+        } catch (screenshotError) {
+          throw new SquarespaceBrowserError(
+            "SCREENSHOT_FAILED",
+            "Deletion was not confirmed, and the post-operation screenshot also failed.",
+            { cause: new AggregateError([error, screenshotError]) },
+          );
+        }
+      }
+
+      if (error instanceof SquarespaceBrowserError) {
+        throw error;
+      }
+      throw new SquarespaceBrowserError(
+        "PAGE_DELETE_FAILED",
+        "Squarespace did not confirm that the page was deleted.",
+        { cause: error },
+      );
+    } finally {
+      await this.restoreCollapsedFolders(page, expandedFolderKeys);
+    }
+  }
+
+  async savePageChanges(
+    websiteId: string,
+    publish = false,
+    confirmation?: "PUBLISH",
+  ): Promise<{
+    success: true;
+    saved: true;
+    published: boolean;
+    action: "saved" | "published" | "already_saved";
+    screenshots: { before: string; after: string };
+    inspection: { before: EditorInspection; after: EditorInspection };
+  }> {
+    const website = this.browser.getWebsite(websiteId);
+    const page = await this.browser.getCurrentPage();
+    this.assertCurrentPageBelongsToWebsite(page, website);
+    if (publish && confirmation !== "PUBLISH") {
+      throw new SquarespaceBrowserError(
+        "CONFIRMATION_REQUIRED",
+        "Publishing changes requires the explicit PUBLISH confirmation.",
+      );
+    }
+
+    const screenshotId = randomUUID();
+    const beforeInspection = await this.inspectEditor(page);
+    const beforeScreenshot = await this.browser.captureScreenshot(
+      `save-page-changes-before-${screenshotId}.png`,
+    );
+    const afterScreenshotName = `save-page-changes-after-${screenshotId}.png`;
+    let actionAttempted = false;
+    let afterScreenshotAttempted = false;
+
+    try {
+      if (publish) {
+        const publishControl = findOneEditorControl(beforeInspection, /^publish$/i);
+        if (!publishControl) {
+          throw new SquarespaceBrowserError(
+            "PAGE_SAVE_FAILED",
+            "The editor did not expose one enabled visible Publish control.",
+          );
+        }
+
+        actionAttempted = true;
+        await page.locator(EDITOR_ACTION_SELECTOR).nth(publishControl.index).click();
+        await this.confirmPublishIfPrompted(page);
+        await this.waitForEditorConfirmation(page, "published");
+      } else {
+        const saveControl = findOneEditorControl(beforeInspection, /^(save|save changes|done)$/i);
+        if (!saveControl) {
+          if (hasEditorConfirmation(beforeInspection, "saved")) {
+            afterScreenshotAttempted = true;
+            const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+            const afterInspection = await this.inspectEditor(page);
+            return {
+              success: true,
+              saved: true,
+              published: false,
+              action: "already_saved",
+              screenshots: { before: beforeScreenshot, after: afterScreenshot },
+              inspection: { before: beforeInspection, after: afterInspection },
+            };
+          }
+          throw new SquarespaceBrowserError(
+            "PAGE_SAVE_FAILED",
+            "The editor did not expose one enabled visible Save or Done control, and no saved confirmation was visible.",
+          );
+        }
+
+        actionAttempted = true;
+        await page.locator(EDITOR_ACTION_SELECTOR).nth(saveControl.index).click();
+        await this.waitForEditorConfirmation(page, "saved");
+      }
+
+      const afterInspection = await this.inspectEditor(page);
+      if (!hasEditorConfirmation(afterInspection, publish ? "published" : "saved")) {
+        throw new SquarespaceBrowserError(
+          "PAGE_SAVE_FAILED",
+          "Squarespace did not expose a visible confirmation that the changes were saved.",
+        );
+      }
+
+      afterScreenshotAttempted = true;
+      const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      return {
+        success: true,
+        saved: true,
+        published: publish,
+        action: publish ? "published" : "saved",
+        screenshots: { before: beforeScreenshot, after: afterScreenshot },
+        inspection: { before: beforeInspection, after: afterInspection },
+      };
+    } catch (error) {
+      if (actionAttempted && !afterScreenshotAttempted) {
+        afterScreenshotAttempted = true;
+        try {
+          await this.browser.captureScreenshot(afterScreenshotName);
+        } catch (screenshotError) {
+          throw new SquarespaceBrowserError(
+            "SCREENSHOT_FAILED",
+            "Saving was not confirmed, and the post-operation screenshot also failed.",
+            { cause: new AggregateError([error, screenshotError]) },
+          );
+        }
+      }
+
+      if (error instanceof SquarespaceBrowserError) {
+        throw error;
+      }
+      throw new SquarespaceBrowserError(
+        "PAGE_SAVE_FAILED",
+        "Squarespace did not confirm that the page changes were saved.",
+        { cause: error },
+      );
+    }
+  }
+
   async updatePageTitle(
     websiteId: string,
     pageId: string,
@@ -949,6 +1234,107 @@ export class SquarespacePagesService {
     }
   }
 
+  private assertCurrentPageBelongsToWebsite(page: Page, website: WebsiteSummary): void {
+    const currentUrl = page.url();
+    if (currentUrl === "about:blank") {
+      return;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(currentUrl);
+    } catch (error) {
+      throw new SquarespaceBrowserError(
+        "INVALID_URL",
+        "The current editor URL could not be verified before saving.",
+        { cause: error },
+      );
+    }
+    if (parsed.origin !== new URL(website.url).origin) {
+      throw new SquarespaceBrowserError(
+        "INVALID_URL",
+        "The current editor does not belong to the selected Squarespace website.",
+      );
+    }
+  }
+
+  private async inspectEditor(page: Page): Promise<EditorInspection> {
+    return page.evaluate<EditorInspection, void>(
+      `(() => {
+        const selector = ${JSON.stringify(EDITOR_ACTION_SELECTOR)};
+        const isVisible = (element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+        const controls = Array.from(document.querySelectorAll(selector))
+          .map((element, index) => {
+            const disabled =
+              element.hasAttribute("disabled") ||
+              element.getAttribute("aria-disabled") === "true" ||
+              (element instanceof HTMLButtonElement && element.disabled);
+            return {
+              index,
+              text: (element.innerText || element.textContent || "").trim(),
+              ariaLabel: element.getAttribute("aria-label"),
+              disabled,
+              visible: isVisible(element),
+            };
+          })
+          .filter((control) => control.visible)
+          .map(({ visible: _visible, ...control }) => control);
+        return {
+          controls,
+          visibleText: (document.body?.innerText || "").slice(0, 20_000),
+          url: window.location.href,
+        };
+      })()`,
+      undefined,
+    );
+  }
+
+  private async confirmPublishIfPrompted(page: Page): Promise<void> {
+    const dialog = page.getByRole("dialog").last();
+    const dialogAppeared = await dialog
+      .waitFor({ state: "visible", timeout: Math.min(2_000, this.timeoutMs) })
+      .then(() => true)
+      .catch(() => false);
+    if (!dialogAppeared) {
+      return;
+    }
+    const publishButton = dialog.getByRole("button", { name: "Publish", exact: true });
+    if ((await publishButton.count()) !== 1 || !(await publishButton.isEnabled())) {
+      throw new SquarespaceBrowserError(
+        "PAGE_SAVE_FAILED",
+        "Squarespace opened a publish confirmation without one unambiguous enabled Publish button.",
+      );
+    }
+    await publishButton.click();
+    await dialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
+  }
+
+  private async waitForEditorConfirmation(
+    page: Page,
+    expected: "saved" | "published",
+  ): Promise<void> {
+    const deadline = Date.now() + this.timeoutMs;
+    while (Date.now() < deadline) {
+      if (hasEditorConfirmation(await this.inspectEditor(page), expected)) {
+        return;
+      }
+      await delay(150);
+    }
+
+    throw new SquarespaceBrowserError(
+      "PAGE_SAVE_FAILED",
+      `Squarespace did not confirm that the changes were ${expected} before the operation timed out.`,
+    );
+  }
+
   private async readGroupLabels(
     websiteId: string,
   ): Promise<Partial<Record<NavigationGroup, string>>> {
@@ -1125,6 +1511,22 @@ export class SquarespacePagesService {
     throw new SquarespaceBrowserError(
       "PAGE_MOVE_FAILED",
       "The page did not appear at the requested destination before the operation timed out.",
+    );
+  }
+
+  private async waitForDeletedPage(page: Page, expectedKey: string): Promise<void> {
+    const deadline = Date.now() + this.timeoutMs;
+    while (Date.now() < deadline) {
+      const currentKeys = pageItemKeys(await this.readPanelItems(page));
+      if (!currentKeys.includes(expectedKey)) {
+        return;
+      }
+      await delay(150);
+    }
+
+    throw new SquarespaceBrowserError(
+      "PAGE_DELETE_FAILED",
+      "The deleted page remained in the Pages panel after the operation timed out.",
     );
   }
 
@@ -1328,6 +1730,40 @@ function countKeys(keys: string[]): Map<string, number> {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
+}
+
+function findOneEditorControl(
+  inspection: EditorInspection,
+  pattern: RegExp,
+): EditorControl | null {
+  const matches = inspection.controls.filter((control) => {
+    if (control.disabled) {
+      return false;
+    }
+    const label = normalizeEditorText(control.ariaLabel || control.text);
+    return pattern.test(label);
+  });
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function hasEditorConfirmation(
+  inspection: EditorInspection,
+  expected: "saved" | "published",
+): boolean {
+  const haystack = normalizeEditorText(
+    [
+      inspection.visibleText,
+      ...inspection.controls.map((control) => `${control.text} ${control.ariaLabel ?? ""}`),
+    ].join(" "),
+  );
+  if (expected === "published") {
+    return /\b(published|site published|changes published)\b/i.test(haystack);
+  }
+  return /\b(saved|all changes saved|changes saved|saved successfully)\b/i.test(haystack);
+}
+
+function normalizeEditorText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function navigationGroupLabel(group: PageCreationGroup): string {

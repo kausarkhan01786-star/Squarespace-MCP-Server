@@ -17,7 +17,7 @@ const pageRecords = new Map([
   ["Work", { slug: "work", enabled: null, navigationTitle: "Work" }],
   ["Services", { slug: "services", enabled: false, navigationTitle: "Services" }],
   ["Footer page", { slug: "footer-page", enabled: true, navigationTitle: "Footer" }],
-  ["Hidden page", { slug: "hidden-page", enabled: false, navigationTitle: "Hidden" }],
+  ["Hidden page", { slug: "hidden-page", enabled: false, navigationTitle: "Hidden page" }],
 ]);
 
 const pagesPanelHtml = `<!doctype html>
@@ -56,7 +56,10 @@ const pagesPanelHtml = `<!doctype html>
       <section>
         <div data-test="pages-panel-group"><h2>Not Linked</h2></div>
         <div data-test="pages-panel-item">
-          <div><button aria-label="Page settings Hidden page"></button></div>
+          <div>
+            <button aria-label="Page settings Hidden page"></button>
+            <button aria-label="Delete page Hidden page" data-test="delete-item"></button>
+          </div>
         </div>
       </section>
     </div>
@@ -70,6 +73,30 @@ const pagesPanelHtml = `<!doctype html>
         const expanded = folderButton.getAttribute('aria-expanded') === 'true';
         folderButton.setAttribute('aria-expanded', expanded ? 'false' : 'true');
         folderButton.parentElement.querySelector('[data-fixture-children]').hidden = expanded;
+        return;
+      }
+      const deleteButton = target.closest('button[data-test="delete-item"]');
+      if (deleteButton) {
+        const settingsButton = deleteButton
+          .closest('[data-test="pages-panel-item"]')
+          .querySelector('button[aria-label^="Page settings "]');
+        const settingsLabel = settingsButton.getAttribute('aria-label');
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        dialog.innerHTML =
+          '<p>Delete this page?</p>' +
+          '<button>Cancel</button><button>Delete</button>';
+        dialog.querySelector('button:last-child').addEventListener('click', () => {
+          Array.from(document.querySelectorAll('[data-test="pages-panel-item"]'))
+            .find(item =>
+              item.querySelector('button[aria-label^="Page settings "]')
+                ?.getAttribute('aria-label') === settingsLabel
+            )
+            ?.remove();
+          dialog.remove();
+        });
+        dialog.querySelector('button').addEventListener('click', () => dialog.remove());
+        document.body.append(dialog);
         return;
       }
       const settingsButton = target.closest('button[aria-label^="Page settings "]');
@@ -291,6 +318,39 @@ const createPageHtml = (persistTitles: boolean, groupLabel: string) => {
 </body></html>`;
 };
 
+const editorHtml = (confirmSave: boolean, publishDialog = false) => `<!doctype html>
+<html><body>
+  <main>
+    <p id="status">Unsaved changes</p>
+    <button id="save">Save</button>
+    <button id="publish">Publish</button>
+  </main>
+  <script>
+    const confirmSave = ${JSON.stringify(confirmSave)};
+    const publishDialog = ${JSON.stringify(publishDialog)};
+    document.getElementById('save').addEventListener('click', () => {
+      if (confirmSave) {
+        document.getElementById('status').textContent = 'All changes saved';
+        document.getElementById('save').remove();
+      }
+    });
+    document.getElementById('publish').addEventListener('click', () => {
+      if (publishDialog) {
+        const dialog = document.createElement('div');
+        dialog.setAttribute('role', 'dialog');
+        dialog.innerHTML = '<p>Publish changes?</p><button>Cancel</button><button>Publish</button>';
+        dialog.querySelector('button:last-child').addEventListener('click', () => {
+          document.getElementById('status').textContent = 'Site published';
+          dialog.remove();
+        });
+        document.body.append(dialog);
+      } else {
+        document.getElementById('status').textContent = 'Site published';
+      }
+    });
+  </script>
+</body></html>`;
+
 test("reads and categorizes nested page records without leaving folder UI expanded", async () => {
   const { browser, page, pages } = await createFixture();
   try {
@@ -328,6 +388,34 @@ test("reads and categorizes nested page records without leaving folder UI expand
     await assert.rejects(() => pages.getPageDetails(website.id, "missing"), {
       code: "PAGE_NOT_FOUND",
     });
+  } finally {
+    await browser.close();
+  }
+});
+
+test("deletes a confirmed non-homepage page and verifies its removal", async () => {
+  const { browser, pages } = await createFixture();
+  try {
+    const records = await pages.listPages(website.id);
+    const target = records.find((record) => record.name === "Hidden page");
+    const home = records.find((record) => record.name === "Home");
+    assert.ok(target);
+    assert.ok(home);
+
+    await assert.rejects(() => pages.deletePage(website.id, home.id, "DELETE"), {
+      code: "PAGE_DELETE_FAILED",
+    });
+
+    const result = await pages.deletePage(website.id, target.id, "DELETE");
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.deletedPageId, target.id);
+    assert.match(result.screenshots.before, /^delete-page-before-.*\.png$/);
+    assert.match(result.screenshots.after, /^delete-page-after-.*\.png$/);
+    assert.equal(
+      (await pages.listPages(website.id)).some((record) => record.name === "Hidden page"),
+      false,
+    );
   } finally {
     await browser.close();
   }
@@ -599,6 +687,56 @@ test("inspects Squarespace section records using the observed data-test selector
   }
 });
 
+test("saves current editor changes and verifies Squarespace confirmation", async () => {
+  const { browser, pages, screenshots } = await createEditorFixture(true);
+  try {
+    const result = await pages.savePageChanges(website.id);
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.published, false);
+    assert.equal(result.action, "saved");
+    assert.equal(screenshots.length, 2);
+    assert.match(result.screenshots.before, /^save-page-changes-before-.*\.png$/);
+    assert.match(result.screenshots.after, /^save-page-changes-after-.*\.png$/);
+    assert.match(result.inspection.after.visibleText, /All changes saved/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("publishes only with explicit confirmation and verifies Squarespace confirmation", async () => {
+  const { browser, pages, screenshots } = await createEditorFixture(true, true);
+  try {
+    await assert.rejects(
+      () => pages.savePageChanges(website.id, true),
+      { code: "CONFIRMATION_REQUIRED" },
+    );
+
+    const result = await pages.savePageChanges(website.id, true, "PUBLISH");
+    assert.equal(result.success, true);
+    assert.equal(result.saved, true);
+    assert.equal(result.published, true);
+    assert.equal(result.action, "published");
+    assert.equal(screenshots.length, 2);
+    assert.match(result.inspection.after.visibleText, /Site published/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("does not report editor save success without Squarespace confirmation", async () => {
+  const { browser, pages, screenshots } = await createEditorFixture(false);
+  try {
+    await assert.rejects(
+      () => pages.savePageChanges(website.id),
+      { code: "PAGE_SAVE_FAILED" },
+    );
+    assert.equal(screenshots.length, 2);
+  } finally {
+    await browser.close();
+  }
+});
+
 async function createFixture(): Promise<{
   browser: Browser;
   page: Page;
@@ -606,6 +744,7 @@ async function createFixture(): Promise<{
 }> {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
+  let initialized = false;
   await page.setContent(pagesPanelHtml);
   const pages = new SquarespacePagesService({
     async listWebsites() {
@@ -621,7 +760,10 @@ async function createFixture(): Promise<{
       if (websiteId !== website.id) {
         throw new Error("Unknown fixture website.");
       }
-      await page.setContent(pagesPanelHtml);
+      if (!initialized) {
+        await page.setContent(pagesPanelHtml);
+        initialized = true;
+      }
     },
     async openWebsiteUrl(websiteId: string, url: string) {
       if (websiteId !== website.id) {
@@ -632,8 +774,8 @@ async function createFixture(): Promise<{
     async getCurrentPage() {
       return page;
     },
-    async captureScreenshot() {
-      return "fixture-screenshot.png";
+    async captureScreenshot(fileName) {
+      return fileName ?? "fixture-screenshot.png";
     },
   });
   return { browser, page, pages };
@@ -720,6 +862,48 @@ async function createMoveFixture(): Promise<{
         }
       },
       async openWebsiteUrl() {},
+      async getCurrentPage() {
+        return page;
+      },
+      async captureScreenshot(fileName?: string) {
+        screenshots.push(fileName ?? "unnamed.png");
+        return fileName ?? "unnamed.png";
+      },
+    },
+    2_000,
+  );
+  return { browser, pages, screenshots };
+}
+
+async function createEditorFixture(
+  confirmSave: boolean,
+  publishDialog = false,
+): Promise<{
+  browser: Browser;
+  pages: SquarespacePagesService;
+  screenshots: string[];
+}> {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.setContent(editorHtml(confirmSave, publishDialog));
+  const screenshots: string[] = [];
+  const pages = new SquarespacePagesService(
+    {
+      async listWebsites() {
+        return [website];
+      },
+      getWebsite(websiteId: string) {
+        if (websiteId !== website.id) {
+          throw new Error("Unknown fixture website.");
+        }
+        return website;
+      },
+      async openWebsitePages() {
+        throw new Error("Editor save should not navigate away from the current editor.");
+      },
+      async openWebsiteUrl() {
+        throw new Error("Editor save should not navigate away from the current editor.");
+      },
       async getCurrentPage() {
         return page;
       },

@@ -43,6 +43,30 @@ const movePageSchema = pageInputSchema.extend({
     .optional()
     .describe("Optional folder ID in the destination group."),
 });
+const deletePageSchema = pageInputSchema.extend({
+  confirmation: z
+    .literal("DELETE")
+    .describe("Explicit confirmation required before deleting a page."),
+});
+const savePageChangesSchema = websiteIdSchema.extend({
+  publish: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe("Whether to publish the saved changes to the live site."),
+  confirmation: z
+    .literal("PUBLISH")
+    .optional()
+    .describe("Required when publish is true."),
+}).superRefine((value, context) => {
+  if (value.publish && value.confirmation !== "PUBLISH") {
+    context.addIssue({
+      code: "custom",
+      path: ["confirmation"],
+      message: "Publishing changes requires confirmation: PUBLISH.",
+    });
+  }
+});
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -71,6 +95,18 @@ const pageUpdateAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: true,
+  openWorldHint: false,
+} as const;
+const pageDeleteAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+const pageSaveAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
   openWorldHint: false,
 } as const;
 
@@ -133,6 +169,34 @@ export function registerPagesTools(
           destination_group,
           destination_folder_id,
         ),
+      ),
+  );
+
+  server.registerTool(
+    "delete_page",
+    {
+      description: "Delete a non-homepage Squarespace page after explicit DELETE confirmation, then verify it was removed.",
+      inputSchema: deletePageSchema,
+      outputSchema,
+      annotations: pageDeleteAnnotations,
+    },
+    async ({ website_id, page_id, confirmation }) =>
+      runTool("delete_page", () =>
+        pages.deletePage(website_id, page_id, confirmation),
+      ),
+  );
+
+  server.registerTool(
+    "save_page_changes",
+    {
+      description: "Save the currently open Squarespace editor changes, or publish them after explicit PUBLISH confirmation, then verify visible Squarespace confirmation.",
+      inputSchema: savePageChangesSchema,
+      outputSchema,
+      annotations: pageSaveAnnotations,
+    },
+    async ({ website_id, publish, confirmation }) =>
+      runTool("save_page_changes", () =>
+        pages.savePageChanges(website_id, publish, confirmation),
       ),
   );
 
