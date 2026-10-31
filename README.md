@@ -1,9 +1,8 @@
 # Squarespace MCP Server
 
-A Node.js and TypeScript foundation for an MCP-compatible Squarespace website
-management agent. It currently provides a reusable, read-only Playwright
-browser service; MCP tools and Squarespace API integrations will be added
-incrementally.
+A Node.js and TypeScript Squarespace MCP server with a persistent Playwright
+browser service and read-only website/page inspection tools. Official API
+integrations and content-changing tools are not included in this phase.
 
 ## Requirements
 
@@ -25,8 +24,8 @@ On macOS or Linux, copy the environment template with:
 cp .env.example .env
 ```
 
-The MCP server entry point and tool registrations are not implemented yet, so
-the `start` command does not start an MCP server.
+The MCP server uses stdio transport. The browser launches only when a browser
+tool is called, not when the MCP process starts.
 
 ## Architecture
 
@@ -35,9 +34,9 @@ src/
   index.ts       Application composition and process entry point
   auth/          Credential and authenticated-session handling
   api/           Clients for officially supported Squarespace APIs
-  browser/       Persistent Playwright session and read-only browser services
+  browser/       Persistent Playwright session and read-only page inspection
   config/        Environment parsing and validated application settings
-  tools/         MCP tool definitions and request handling
+  tools/         MCP inspection tool definitions and request handling
   utils/         Shared logging, errors, and small utilities
 ```
 
@@ -102,13 +101,55 @@ saved within the profile's `screenshots` directory.
 This service can navigate, inspect pages, switch among listed websites, and
 capture screenshots; it does not edit or publish website content.
 
+## Pages inspection tools
+
+The MCP server registers these read-only tools:
+
+- `list_websites` — list sites available in the manually authenticated account.
+- `list_pages` — return page IDs, names, page/folder types, URLs, navigation
+  groups, parent folders, and enabled status; optionally filter by group.
+- `get_page_details` — read one page's settings and navigation metadata.
+- `get_page_url` — return one page's internal URL.
+- `get_navigation_structure` — return nested Main Navigation, Footer
+  Navigation, Not Linked, and other groups.
+- `list_not_linked_pages` — list pages in the Not Linked group.
+- `inspect_page_sections` — inspect visible headings and text in a page's
+  rendered sections.
+
+Call `list_websites` first, then pass the returned `website_id` to page tools.
+Use page IDs returned from `list_pages` for `get_page_details`,
+`get_page_url`, and `inspect_page_sections`. Results are returned as
+structured JSON. If the persistent browser profile is not authenticated, the
+visible browser opens and the account owner must complete sign-in manually.
+
+The pages service uses DOM markers observed in the Squarespace interface:
+`[data-test="websiteCard"]`, `[data-test="pages-panel"]`,
+`[data-test="pages-panel-group"]`, and `[data-test="pages-panel-item"]`.
+It reads page title/slug/enabled status through the visible page settings
+dialog, closes that dialog without saving, and restores folders that were
+initially collapsed. Section inspection uses the observed
+`[data-test="page-section"]` marker in the rendered page frame. If Squarespace
+changes these markers or the panel does not load, tools return an explicit
+error instead of silently returning an incomplete result.
+
+Page types are reported conservatively as `folder` or `page`, based on the
+observed folder controls. A page's enabled/disabled status is `unknown` when
+Squarespace does not expose an Enable Page checkbox for that item. Navigation
+group and enabled status are separate properties: a Not Linked page can still
+be enabled.
+
+All tools are marked read-only and do not create, edit, delete, save, or
+publish website content. Opening and closing page settings and temporarily
+expanding folders are used only to inspect existing page data; original
+collapsed folder states are restored afterward.
+
 ## Development
 
 - `npm run dev` — watch and run the TypeScript entry point
 - `npm run build` — compile to `dist/`
 - `npm run typecheck` — run TypeScript without emitting files
-- `npm test` — run browser URL and profile-path security tests
+- `npm test` — run browser, Pages inspection, and MCP tool tests
 - `npm start` — run the compiled entry point
 
-Strict TypeScript checks are enabled in `tsconfig.json`. This initial phase
-intentionally does not implement MCP tools or connect to Squarespace APIs.
+Strict TypeScript checks are enabled in `tsconfig.json`. No Squarespace API
+calls are made by these inspection tools.

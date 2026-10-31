@@ -1,0 +1,148 @@
+import { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import { SquarespacePagesService } from "../browser/squarespace-pages.service.js";
+
+const outputSchema = z.object({ result: z.unknown() });
+const websiteIdSchema = z.object({
+  website_id: z.string().trim().min(1).describe("ID returned by list_websites."),
+});
+const pageInputSchema = websiteIdSchema.extend({
+  page_id: z.string().trim().min(1).describe("ID returned by list_pages."),
+});
+const listPagesSchema = websiteIdSchema.extend({
+  group: z.enum(["main_navigation", "footer_navigation", "not_linked", "other"]).optional(),
+});
+const readOnlyAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+export function registerPagesTools(
+  server: McpServer,
+  pages: SquarespacePagesService,
+): void {
+  server.registerTool(
+    "list_websites",
+    {
+      description: "List Squarespace websites available in the manually authenticated browser session.",
+      inputSchema: z.object({}),
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async () => runReadOnlyTool("list_websites", () => pages.listWebsites()),
+  );
+
+  server.registerTool(
+    "list_pages",
+    {
+      description: "Read page names, URLs, types, navigation groups, nesting, and enabled status for a Squarespace website.",
+      inputSchema: listPagesSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, group }) =>
+      runReadOnlyTool("list_pages", () =>
+        pages.listPages(website_id, group),
+      ),
+  );
+
+  server.registerTool(
+    "get_page_details",
+    {
+      description: "Read the visible settings and navigation details for one Squarespace page.",
+      inputSchema: pageInputSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, page_id }) =>
+      runReadOnlyTool("get_page_details", () =>
+        pages.getPageDetails(website_id, page_id),
+      ),
+  );
+
+  server.registerTool(
+    "get_page_url",
+    {
+      description: "Return the internal Squarespace URL slug resolved for one page.",
+      inputSchema: pageInputSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, page_id }) =>
+      runReadOnlyTool("get_page_url", () => pages.getPageUrl(website_id, page_id)),
+  );
+
+  server.registerTool(
+    "get_navigation_structure",
+    {
+      description: "Return Main Navigation, Footer Navigation, and Not Linked pages as a nested tree.",
+      inputSchema: websiteIdSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id }) =>
+      runReadOnlyTool("get_navigation_structure", () =>
+        pages.getNavigationStructure(website_id),
+      ),
+  );
+
+  server.registerTool(
+    "list_not_linked_pages",
+    {
+      description: "List pages in Squarespace's Not Linked group, including nested pages.",
+      inputSchema: websiteIdSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id }) =>
+      runReadOnlyTool("list_not_linked_pages", () =>
+        pages.listNotLinkedPages(website_id),
+      ),
+  );
+
+  server.registerTool(
+    "inspect_page_sections",
+    {
+      description: "Inspect visible content sections on one Squarespace page without editing or publishing it.",
+      inputSchema: pageInputSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, page_id }) =>
+      runReadOnlyTool("inspect_page_sections", () =>
+        pages.inspectPageSections(website_id, page_id),
+      ),
+  );
+}
+
+async function runReadOnlyTool(
+  toolName: string,
+  action: () => Promise<unknown>,
+): Promise<{
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent?: { result: unknown };
+  isError?: boolean;
+}> {
+  try {
+    const result = await action();
+    return {
+      content: [{ type: "text", text: JSON.stringify({ result }) }],
+      structuredContent: { result },
+    };
+  } catch (error) {
+    const detail = error instanceof SquarespaceBrowserError
+      ? { code: error.code, message: error.message }
+      : {
+          code: "UNEXPECTED_ERROR",
+          message: error instanceof Error ? error.message : "The tool failed for an unknown reason.",
+        };
+    console.error(`[${toolName}] ${detail.code}: ${detail.message}`);
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({ error: detail }) }],
+    };
+  }
+}

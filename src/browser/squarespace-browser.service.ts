@@ -70,7 +70,7 @@ export class SquarespaceBrowserService {
   private readonly loginTimeoutMs: number;
   private context: BrowserContext | undefined;
   private page: Page | undefined;
-  private readonly websiteDestinations = new Map<string, string>();
+  private readonly websiteDestinations = new Map<string, WebsiteSummary>();
 
   constructor(options: SquarespaceBrowserOptions = {}) {
     this.profileDirectory = resolveProfileDirectory(
@@ -141,16 +141,46 @@ export class SquarespaceBrowserService {
 
   async listWebsites(): Promise<WebsiteSummary[]> {
     const page = await this.getPage();
+    if (new URL(page.url()).origin !== new URL(ACCOUNT_DASHBOARD_URL).origin) {
+      await this.navigate(page, ACCOUNT_DASHBOARD_URL);
+    }
     if (!(await this.isDashboardAuthenticated(page))) {
       throw new SquarespaceBrowserError(
         "NOT_LOGGED_IN",
-        "A logged-in Squarespace dashboard is required before listing websites. Open the dashboard and complete manual login first.",
+        "The visible browser is open at the Squarespace dashboard or login page. Complete sign-in manually, then call list_websites again.",
       );
     }
 
     // tsx injects a __name helper that is unavailable inside Playwright's page context.
     const discovered = await page.evaluate<DiscoveredWebsite[], void>(
-      `(${collectWebsiteLinks.toString()})()`,
+      `(() => {
+        const cards = Array.from(document.querySelectorAll('[data-test="websiteCard"]'));
+        const cardSites = cards.map((card) => {
+          const link = card.querySelector('a[aria-label^="Go to website:"]');
+          if (!link || !(link instanceof HTMLAnchorElement)) return null;
+          const url = link.href;
+          const hostname = new URL(url).hostname;
+          const lines = (card.innerText || '').split(/\\n+/).map((line) => line.trim()).filter(Boolean);
+          const name = lines.find((line) =>
+            line.toLowerCase() !== 'go to website' &&
+            !line.toLowerCase().includes(hostname.toLowerCase()) &&
+            !/website trial|trial expired|^website selling$/i.test(line)
+          );
+          return { name: name || hostname, url };
+        }).filter((site) => site !== null);
+        if (cardSites.length > 0) return cardSites;
+        return Array.from(document.querySelectorAll('a'))
+          .filter((anchor) => anchor instanceof HTMLAnchorElement &&
+            new URL(anchor.href).hostname !== 'account.squarespace.com' &&
+            /\\/(?:websites|config)(?:\\/|$)/.test(new URL(anchor.href).pathname))
+          .map((anchor) => {
+            const element = anchor;
+            return {
+              name: element.innerText.trim() || element.getAttribute('aria-label') || new URL(element.href).hostname,
+              url: element.href
+            };
+          });
+      })()`,
       undefined,
     );
 
@@ -160,14 +190,18 @@ export class SquarespaceBrowserService {
       if (!isSquarespaceUrl(website.url)) {
         continue;
       }
-      const id = createHash("sha256").update(website.url).digest("hex").slice(0, 16);
+      const canonicalUrl = new URL(website.url);
+      canonicalUrl.search = "";
+      canonicalUrl.hash = "";
+      const id = createHash("sha256").update(canonicalUrl.toString()).digest("hex").slice(0, 16);
       if (!uniqueSites.has(id)) {
-        this.websiteDestinations.set(id, website.url);
-        uniqueSites.set(id, {
+        const summary = {
           id,
           name: website.name,
-          url: redactUrl(website.url),
-        });
+          url: redactUrl(canonicalUrl.toString()),
+        };
+        this.websiteDestinations.set(id, summary);
+        uniqueSites.set(id, summary);
       }
     }
 
@@ -175,14 +209,48 @@ export class SquarespaceBrowserService {
   }
 
   async switchWebsite(websiteId: string): Promise<void> {
-    const destination = this.websiteDestinations.get(websiteId);
-    if (!destination) {
+    const website = this.websiteDestinations.get(websiteId);
+    if (!website) {
       throw new SquarespaceBrowserError(
         "WEBSITE_NOT_FOUND",
         "That website is not in the latest listWebsites() result. Refresh the website list and select a returned ID.",
       );
     }
-    await this.navigate(await this.getPage(), destination);
+    await this.navigate(await this.getPage(), website.url);
+  }
+
+  getWebsite(websiteId: string): WebsiteSummary {
+    const website = this.websiteDestinations.get(websiteId);
+    if (!website) {
+      throw new SquarespaceBrowserError(
+        "WEBSITE_NOT_FOUND",
+        "That website is not in the latest listWebsites() result. Call list_websites first and use a returned ID.",
+      );
+    }
+    return website;
+  }
+
+  async openWebsitePages(websiteId: string): Promise<void> {
+    const website = this.getWebsite(websiteId);
+    const pagesUrl = new URL("/config/pages", website.url);
+    await this.navigate(await this.getPage(), pagesUrl.toString());
+  }
+
+  async openWebsiteUrl(websiteId: string, destination: string): Promise<void> {
+    const website = this.getWebsite(websiteId);
+    const target = assertAllowedSquarespaceUrl(destination);
+    const siteOrigin = new URL(website.url).origin;
+    if (target.origin !== siteOrigin) {
+      throw new SquarespaceBrowserError(
+        "INVALID_URL",
+        "Page navigation must stay on the selected Squarespace website.",
+      );
+    }
+    await this.navigate(await this.getPage(), target.toString());
+  }
+
+  async getCurrentPage(): Promise<Page> {
+    return this.getPage();
   }
 
   async inspectCurrentPage(): Promise<PageInspection> {
@@ -374,28 +442,6 @@ function isSquarespaceUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function collectWebsiteLinks(): DiscoveredWebsite[] {
-  const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>("a"));
-  return anchors
-    .filter((element) => {
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      const path = new URL(element.href).pathname;
-      return (
-        style.visibility !== "hidden" &&
-        style.display !== "none" &&
-        rect.width > 0 &&
-        rect.height > 0 &&
-        /\/(?:websites|config)(?:\/|$)/.test(path)
-      );
-    })
-    .map((element) => ({
-      name: element.innerText.trim() || element.getAttribute("aria-label") || "",
-      url: element.href,
-    }))
-    .filter((website) => website.name.length > 0);
 }
 
 function collectPageDetails(): RawPageInspection {
