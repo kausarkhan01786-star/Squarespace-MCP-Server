@@ -36,8 +36,9 @@ src/
   api/           Reserved for API clients
   browser/       Persistent Playwright session and page inspection/mutations
   commerce/      Commerce provider abstraction and Squarespace API adapter
+  workflow/      CMS-independent workflow contracts, engine, and Squarespace adapter
   config/        Environment parsing and validated application settings
-  tools/         MCP inspection tool definitions and request handling
+  tools/         MCP tool definitions and request handling
   utils/         Shared logging, errors, and small utilities
 ```
 
@@ -348,12 +349,175 @@ Reading settings opens the relevant existing panel and closes it without
 saving. These tools do not change navigation, page SEO, domains, language,
 timezone, favicon, social links, or any other live Squarespace content.
 
+## AI CMS developer workflow (Step 9)
+
+The workflow tools provide structured coordination for an AI agent hosted by
+the MCP client. The server validates briefs/design specifications, verifies a
+selected website against the active authenticated Squarespace website listing,
+plans tasks against explicit adapter capabilities, and executes only registered
+operations. It does not contain an LLM, accept or analyze image files, or
+silently select a different site/CMS. The host AI must supply the structured
+interpretation; the server does not claim that it independently understood a
+free-form brief or screenshot.
+
+Registered workflow tools:
+
+- `analyze_client_requirements` — requires `brief` with `businessType`,
+  `websiteGoals`, `targetAudience`, `requiredPages` (each with `name`,
+  `purpose`, and `sections`), `requiredFeatures`, `contentRequirements`,
+  `designPreferences`, `assetRequirements`, `responsiveRequirements`, and
+  `openQuestions`. Optional `design_specification` includes a source, visual
+  hierarchy, colors/confidence, typography, spacing/layout, components,
+  image placements, and responsive behavior. Pixel comparison is always
+  reported unverified.
+- `plan_website_workflow` — requires `cms` (`squarespace`), `website_id`
+  returned by `list_websites`, the structured `brief`, optional
+  `design_specification`, and ordered `tasks`. Each task has an `action` and
+  only the identifiers/options relevant to existing tools, such as `page_id`,
+  `product_id`, `cursor`, `offset`, or `limit`. Page-targeted tasks require
+  `page_id`. Unsupported actions are represented in the plan rather than
+  called.
+- `approve_workflow_tasks` — requires `workflow_id`, the exact returned
+  `plan_fingerprint`, selected `task_ids`, and `confirmed: true`. This is the
+  explicit approval checkpoint for high-impact tasks. MCP hosts must obtain
+  that approval from the user; a boolean supplied by an unattended model is
+  not proof of human consent.
+- `execute_website_workflow` — requires a workflow ID; `max_tasks` is 1–10
+  (default 1). Tasks execute in plan order, one at a time. Previously completed
+  tasks are not repeated. It returns each just-completed task's structured tool
+  result so the host agent can inspect evidence. Retry is opt-in and limited to
+  failed tasks declared both read-only and retry-safe; mutations are never
+  retried automatically.
+- `get_workflow_status` and `get_workflow_qa_report` — inspect task execution
+  and evidence-based QA status.
+- `list_workflow_adapters` — report available CMS adapters and each operation's
+  supported status/limitations.
+
+The Squarespace adapter currently executes only verified operations:
+
+| Workflow action | Registered tool | Support |
+| --- | --- | --- |
+| `inspect_pages` | `list_pages` | Read-only |
+| `inspect_page` | `get_page_details` | Read-only |
+| `inspect_page_sections` | `inspect_page_sections` | Read-only |
+| `inspect_responsive` | `inspect_mobile_responsive` | Read-only |
+| `inspect_page_seo` | `inspect_page_seo` | Read-only |
+| `inspect_design` | `inspect_color_themes` | Read-only rendered section colors |
+| `backup_page` | `create_page_snapshot` | Local snapshot/screenshots |
+| `inspect_products` | `list_products` | Read-only; requires configured Commerce API |
+| `inspect_product` | `get_product_details` | Read-only; requires configured Commerce API |
+| `inspect_inventory` | `list_inventory` | Read-only; requires configured Commerce API |
+| `inspect_orders` | `list_orders` | Read-only; customer-sensitive fields omitted |
+| `inspect_discounts` | `list_discounts` | Read-only; requires configured Commerce API |
+| `add_text_section` | `add_text_section` | Guarded, narrowly scoped mutation |
+
+`add_text_section` accepts `page_id`, `text`, `background_color: "#FFFFFF"`,
+`text_color: "#000000"`, and `confirm_potentially_live_save: true`. Its
+workflow task must be approved using the workflow ID and exact plan
+fingerprint; planning first checks that the target is the confirmed Kausar Mia
+website and its Home page. The task-specific flag and approval step are both
+required. Approval explicitly
+permits the existing tool's potentially-live Save, because draft-only Save
+behavior has not been confirmed. The content tool still creates and verifies
+a fresh snapshot/screenshots, checks site and Home-page identity, verifies the
+result, and never clicks Publish. Other page creation/editing, arbitrary block
+or design changes, navigation changes, custom code, commerce writes, order
+changes, discounts, and publishing are unsupported and are not executed.
+
+Workflow plans and results are held in memory and disappear when the MCP server
+restarts. The service does not persist client briefs. QA reports distinguish
+completed tool execution from measured results; mobile overflow is only
+reported when the responsive inspector returned it, and screenshot/reference
+comparison, general link checks, pixel-level matching, and publication status
+remain unverified. Only the Squarespace adapter is real; Shopify, WordPress,
+Wix, Webflow, and HubSpot adapters are not advertised or registered.
+
+### Provider and CMS extension contracts
+
+`src/workflow/ai-provider-ports.ts` defines provider-neutral TypeScript
+interfaces for requirement analysis, screenshot understanding, website
+planning, content generation, task selection, and quality analysis. These are
+integration ports only: there is no AI client, model credential, image upload
+path, or fabricated implementation in this server. The MCP client/agent may
+implement them and must label model-generated or estimated values as such.
+
+Every future CMS adapter must implement `WorkflowAdapter`, validate an exact
+site identity, list explicit per-action capabilities, reject unsupported
+actions, and use CMS-specific verified tools for execution. Platform-specific
+site IDs, authentication, backup/restore semantics, and approval requirements
+must remain inside each adapter. No fallback to another CMS or website is
+permitted. Integration status:
+
+| CMS | Adapter status | Contract entry point |
+| --- | --- | --- |
+| Squarespace | Implemented for the actions listed above | `WorkflowAdapter` and `SquarespaceWorkflowAdapter` |
+| WordPress | Not implemented | Build a WordPress-specific adapter only after REST API/authentication, backup, and verification behavior are validated |
+| Shopify | Not implemented | Build a Shopify Admin API adapter with scoped access, shop identity validation, and mutation-specific confirmation |
+| Wix | Not implemented | Build a Wix-specific adapter after supported API and site identity behavior are verified |
+| Webflow | Not implemented | Build a Webflow-specific adapter after API scopes, site identity, and publishing/draft semantics are verified |
+| HubSpot | Not implemented | Build a HubSpot CMS adapter after account identity, content APIs, and publication safeguards are verified |
+
+### Persistence, recovery, and security audit status
+
+No persistent workflow store is enabled. A safe next design is a
+`WorkflowRepository` interface backed by local SQLite with migrations and
+transactional writes for workflow plans, task state transitions, and approval
+records. The schema should separate workflow metadata, ordered task input,
+approval fingerprints/actors/timestamps, and sanitized execution events.
+Task inputs and results may contain client content, so retention must be
+bounded and configurable; omit screenshots and customer data by default.
+Persist no API keys, cookies, or browser profiles. Store the database outside
+the repository with restrictive OS permissions and use OS-backed encryption
+for sensitive fields where required. On restart, mark tasks left `running` as
+`interrupted`/`outcome_unknown`; never retry a mutation automatically. Require
+fresh site verification and re-approval before recovery can resume a mutation.
+This persistence design is not implemented yet.
+
+Security boundaries include HTTPS Squarespace-domain checks, per-call
+website-list validation, API site ID/URL matching, Zod tool schemas, explicit
+workflow approvals, and backups for the current text-section mutation. Page
+snapshots are sanitized inspection records, not restorable CMS exports; they
+have no cryptographic integrity signature. Browser operations share one
+persistent browser page, so concurrent calls across independent MCP tools are
+not globally serialized; avoid concurrent website mutations until a
+browser-wide operation lock is introduced.
+
+MCP tests use the SDK's in-memory client/server transport and mocked adapters;
+browser tests use fixture DOMs, and commerce tests mock `fetch`. They do not
+authenticate to or mutate a live Squarespace site. During the Step 10 audit,
+the shared browser showed the Kausar Mia Pages settings route, but its captured
+console history included network-disconnected and rendering errors. Therefore
+the browser's present authentication/connectivity and current UI workflow
+controls were not considered verified by that inspection.
+
+The current checkout had a modified `.env.example` with nonempty
+`SQUARESPACE_API_KEY` and `SQUARESPACE_SITE_ID` assignments. Their values were
+not displayed or changed in this audit because the file was already user
+modified. Replace them with explicit safe placeholders before committing or
+sharing the file. `.env` is ignored and was not present; its contents were not
+read.
+
+### Verified capability prioritization
+
+| Candidate | Current status | Next safe work |
+| --- | --- | --- |
+| Create page | An internal Pages service has mock-tested page creation, saved-title verification, and before/after screenshots; no MCP tool is registered | Verify present UI and add fresh snapshot, explicit approval, failure recovery, and MCP communication tests before exposing it |
+| Add blank section / text block | Only the narrowly scoped `add_text_section` flow is registered | Keep other variants unsupported until UI selectors, backup, save semantics, and post-save content verification are validated |
+| Add images or buttons | No verified add/edit tools | Inspect UI and upload/link semantics first; then add isolated guarded tools |
+| Edit existing content | Existing block inspection does not expose a verified general edit schema | Do not infer schemas from rendered block types |
+| Change section background / typography | Rendered color inspection exists; general design-setting controls are not verified | Verify controls and style semantics before a mutation API |
+| Navigation management | Read-only hierarchy and links are available | Verify supported mutation workflow, rollback, and confirmation behavior |
+| SEO metadata | Read-only settings and rendered metadata inspection are available | Verify an update workflow, snapshot coverage, and rendered post-save results |
+| Responsive QA | Desktop/mobile measurements exist; no tablet screenshot or AI vision analysis | Add tablet and multi-viewport screenshot evidence; keep model analysis a separate optional provider |
+
+No live website mutation or Commerce API request was performed for this audit.
+
 ## Development
 
 - `npm run dev` — watch and run the TypeScript entry point
 - `npm run build` — compile to `dist/`
 - `npm run typecheck` — run TypeScript without emitting files
-- `npm test` — run browser, Pages inspection, and MCP tool tests
+- `npm test` — run browser, CMS, workflow, and MCP tool tests
 - `npm start` — run the compiled entry point
 
 Strict TypeScript checks are enabled in `tsconfig.json`. The page/design tools use the visible Squarespace interface. The commerce tools

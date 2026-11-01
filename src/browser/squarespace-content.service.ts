@@ -54,6 +54,13 @@ export class SquarespaceContentService {
     }
   }
 
+  async verifyHomePageTarget(websiteId: string, pageId: string): Promise<void> {
+    const website = this.browser.getWebsite(websiteId);
+    this.assertConfirmedWebsite(website);
+    const homePage = await this.pages.getPageDetails(websiteId, pageId);
+    this.assertHomePage(homePage, website, pageId);
+  }
+
   async addTextSection(rawInput: unknown): Promise<{
     websiteId: string;
     pageId: string;

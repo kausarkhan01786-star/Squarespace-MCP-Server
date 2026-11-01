@@ -13,6 +13,9 @@ import { registerContentTools } from "./tools/content-tools.js";
 import { registerCommerceTools } from "./tools/commerce-tools.js";
 import { registerNavigationSeoSettingsTools } from "./tools/navigation-seo-settings-tools.js";
 import { registerPagesTools } from "./tools/pages-tools.js";
+import { registerWorkflowTools } from "./tools/workflow-tools.js";
+import { SquarespaceWorkflowAdapter } from "./workflow/squarespace-workflow.adapter.js";
+import { WebsiteWorkflowService } from "./workflow/website-workflow.service.js";
 
 async function main(): Promise<void> {
   const browser = new SquarespaceBrowserService();
@@ -31,6 +34,17 @@ async function main(): Promise<void> {
       : {}),
   });
   const commerce = new SquarespaceCommerceService(browser, commerceProvider);
+  const workflow = new WebsiteWorkflowService(new Map([
+    ["squarespace", new SquarespaceWorkflowAdapter({
+      browser,
+      pages,
+      design,
+      settings: navigationSeoSettings,
+      backups,
+      content,
+      commerce,
+    })],
+  ]));
   const server = new McpServer({
     name: "squarespace-mcp-server",
     version: "0.1.0",
@@ -42,6 +56,7 @@ async function main(): Promise<void> {
   registerContentTools(server, content);
   registerCommerceTools(server, commerce);
   registerNavigationSeoSettingsTools(server, navigationSeoSettings);
+  registerWorkflowTools(server, workflow);
   transport.onclose = () => {
     void browser.close().catch((error: unknown) => {
       console.error("Could not close the Squarespace browser cleanly.", error);

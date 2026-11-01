@@ -46,6 +46,51 @@ test("validates the requested text and exact colors", () => {
   assert.throws(() => addTextSectionInputSchema.parse({ ...input, background_color: "#fff" }));
 });
 
+test("validates the exact Home-page target without creating a backup or editing the page", async () => {
+  let pageReads = 0;
+  const service = new SquarespaceContentService(
+    {
+      getWebsite() {
+        return confirmedWebsite;
+      },
+      async openWebsiteUrl() {
+        throw new Error("Target validation must not navigate.");
+      },
+      async getCurrentPage() {
+        throw new Error("Target validation must not open the editor.");
+      },
+    },
+    {
+      async getPageDetails() {
+        pageReads += 1;
+        return homePage;
+      },
+      async inspectPageSections() {
+        throw new Error("Target validation must not inspect or edit sections.");
+      },
+      async savePageChanges() {
+        throw new Error("Target validation must not save.");
+      },
+    },
+    {
+      async createPageSnapshot() {
+        throw new Error("Target validation must not create a backup.");
+      },
+      async verifyFreshSnapshot() {
+        throw new Error("Target validation must not verify a backup.");
+      },
+    },
+  );
+
+  await service.verifyHomePageTarget(input.website_id, input.page_id);
+  assert.equal(pageReads, 1);
+  await assert.rejects(
+    service.verifyHomePageTarget(input.website_id, "not-home"),
+    { code: "TEXT_SECTION_TARGET_MISMATCH" },
+  );
+  assert.equal(pageReads, 2);
+});
+
 test("requires explicit potentially-live-save approval before any site or backup access", async () => {
   let browserCalls = 0;
   let pageCalls = 0;

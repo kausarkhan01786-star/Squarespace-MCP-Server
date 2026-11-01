@@ -29,9 +29,13 @@ export async function runTool(
       ? { code: error.code, message: error.message }
       : {
           code: "UNEXPECTED_ERROR",
-          message: error instanceof Error ? error.message : "The tool failed for an unknown reason.",
+          message: "The operation failed unexpectedly. Check server diagnostics without exposing credentials.",
         };
-    console.error(`[${toolName}] ${detail.code}: ${detail.message}`);
+    if (error instanceof SquarespaceBrowserError) {
+      console.error(`[${toolName}] ${detail.code}: ${detail.message}`);
+    } else {
+      console.error(`[${toolName}] UNEXPECTED_ERROR`);
+    }
     return {
       isError: true,
       content: [{ type: "text", text: JSON.stringify({ error: detail }) }],
