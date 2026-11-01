@@ -2,10 +2,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { PageBackupService } from "./backups/page-backup.service.js";
 import { SquarespaceBrowserService } from "./browser/squarespace-browser.service.js";
+import { SquarespaceContentService } from "./browser/squarespace-content.service.js";
+import { SquarespaceCommerceProvider } from "./commerce/squarespace-commerce.provider.js";
+import { SquarespaceCommerceService } from "./commerce/squarespace-commerce.service.js";
 import { SquarespaceDesignService } from "./browser/squarespace-design.service.js";
 import { SquarespaceNavigationSeoSettingsService } from "./browser/squarespace-navigation-seo-settings.service.js";
 import { SquarespacePagesService } from "./browser/squarespace-pages.service.js";
 import { registerDesignTools } from "./tools/design-tools.js";
+import { registerContentTools } from "./tools/content-tools.js";
+import { registerCommerceTools } from "./tools/commerce-tools.js";
 import { registerNavigationSeoSettingsTools } from "./tools/navigation-seo-settings-tools.js";
 import { registerPagesTools } from "./tools/pages-tools.js";
 
@@ -16,6 +21,16 @@ async function main(): Promise<void> {
   const navigationSeoSettings =
     new SquarespaceNavigationSeoSettingsService(browser, pages);
   const backups = new PageBackupService(pages, browser);
+  const content = new SquarespaceContentService(browser, pages, backups);
+  const commerceProvider = new SquarespaceCommerceProvider({
+    ...(process.env.SQUARESPACE_API_KEY
+      ? { apiKey: process.env.SQUARESPACE_API_KEY }
+      : {}),
+    ...(process.env.SQUARESPACE_SITE_ID
+      ? { expectedSiteId: process.env.SQUARESPACE_SITE_ID }
+      : {}),
+  });
+  const commerce = new SquarespaceCommerceService(browser, commerceProvider);
   const server = new McpServer({
     name: "squarespace-mcp-server",
     version: "0.1.0",
@@ -24,6 +39,8 @@ async function main(): Promise<void> {
 
   registerPagesTools(server, pages, backups);
   registerDesignTools(server, design);
+  registerContentTools(server, content);
+  registerCommerceTools(server, commerce);
   registerNavigationSeoSettingsTools(server, navigationSeoSettings);
   transport.onclose = () => {
     void browser.close().catch((error: unknown) => {

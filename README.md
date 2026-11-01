@@ -1,8 +1,8 @@
 # Squarespace MCP Server
 
 A Node.js and TypeScript Squarespace MCP server with a persistent Playwright
-browser service and read-only website/page inspection tools. Official API
-integrations and content-changing tools are not included in this phase.
+browser service, website/page inspection tools, one guarded Home-page content
+mutation, and read-only Squarespace Commerce API inspection tools.
 
 ## Requirements
 
@@ -33,8 +33,9 @@ tool is called, not when the MCP process starts.
 src/
   index.ts       Application composition and process entry point
   auth/          Credential and authenticated-session handling
-  api/           Clients for officially supported Squarespace APIs
-  browser/       Persistent Playwright session and read-only page inspection
+  api/           Reserved for API clients
+  browser/       Persistent Playwright session and page inspection/mutations
+  commerce/      Commerce provider abstraction and Squarespace API adapter
   config/        Environment parsing and validated application settings
   tools/         MCP inspection tool definitions and request handling
   utils/         Shared logging, errors, and small utilities
@@ -66,6 +67,17 @@ environment to an absolute directory outside the project. The `.env.example` fil
 template; this scaffold does not load `.env` files automatically, so set
 environment variables in your shell or hosting environment. Treat the profile
 and screenshots as sensitive: they can contain authenticated website data.
+
+Commerce tools use Squarespace's official API, separately from browser
+authentication. Configure `SQUARESPACE_API_KEY` and `SQUARESPACE_SITE_ID` in
+the MCP server process environment. The API key must have only the read-only
+Products, Inventory, Orders, and Discounts permissions needed for the tools
+you use. `SQUARESPACE_SITE_ID` is the `siteId` returned by
+`GET /1.0/authorization/website` for that key. Each commerce request verifies
+that API identity and URL against the selected website from `list_websites`;
+the API key is never accepted as a tool argument or written to logs. Tool calls
+fail explicitly when credentials, read permissions, or site identity do not
+match.
 
 Example usage from TypeScript:
 
@@ -102,9 +114,9 @@ This service can navigate, inspect pages, switch among listed websites, and
 capture screenshots. Screenshots are saved to the local profile's
 `screenshots` directory by the browser service.
 
-## Pages tools
+## Pages and content tools
 
-The MCP server registers only read-only inspection tools:
+The server registers these website, page, and content tools:
 
 - `list_websites` — list sites available in the manually authenticated account.
 - `list_pages` — return page IDs, names, page/folder types, URLs, navigation
@@ -145,6 +157,48 @@ The MCP server registers only read-only inspection tools:
   editing form is available.
 - `list_available_block_types` — list types seen on the selected page, marked
   incomplete because this is not the add-block catalog.
+- `add_text_section` — add a blank section at the bottom of Kausar Mia's Home
+  page with one Text block, using the requested text, a pure-white section, and
+  pure-black text. It first writes and verifies a fresh local JSON snapshot and
+  screenshots, then checks the rendered result after Save.
+
+## Commerce tools (increment 1: read-only)
+
+The commerce provider interface lives separately from browser workflows so
+future CMS adapters can report their own capabilities. The first adapter uses
+Squarespace's documented HTTPS Commerce APIs and exposes:
+
+- `get_commerce_capabilities` — distinguishes documented API support from
+  tools currently implemented by this adapter.
+- `list_products` — `website_id` (required), `cursor` (optional).
+- `get_product_details` — `website_id` and `product_id` (required).
+- `list_inventory` — `website_id` (required), `cursor` (optional).
+- `list_orders` — `website_id` (required), `cursor` (optional). Results retain
+  order totals/status, item, and fulfillment summaries, while excluding
+  customer names, email, addresses, IDs, custom-form answers, internal notes,
+  and tracking numbers/URLs.
+- `list_discounts` — `website_id` (required), `offset` (0–1,000,000,
+  default 0), and `limit` (1–100, default 50).
+
+All six tools are read-only and use Zod validation. Orders and discounts are
+never changed or activated. Commerce API calls do not use or inspect browser
+cookies; they require a separate scoped API key.
+When the Inventory API returns a bare array without pagination metadata, the
+tool reports `hasNextPage: null` rather than claiming the result is complete.
+
+Squarespace documents write APIs for products, inventory, and discounts, but
+this increment does not expose them: commerce-specific before/after backups,
+idempotency, confirmation, and post-mutation verification are not implemented.
+The current capability report distinguishes these documented APIs from
+unavailable MCP tools. Category/collection management is not exposed because
+the reviewed Commerce API docs do not document a categories/collections
+endpoint; product tags are not treated as categories. These are marked
+unverified, not asserted to be impossible. Order detail is similarly marked
+unverified because a single-order endpoint was not verified. Order mutation
+tools are also not exposed in this increment. Inventory is returned as
+Squarespace records; out-of-stock classification and inventory-settings
+inspection are not yet exposed because the required normalized semantics or
+settings workflow have not been verified.
 
 Call `list_websites` first, then pass the returned `website_id` to page tools.
 Use page IDs returned from `list_pages` for page and section inspection.
@@ -178,13 +232,19 @@ only its heading and no typography, color, button, form, or spacing controls.
 The settings tools therefore return an explicit error rather than inventing
 site-wide values. Rendered typography, section colors, and semantic button
 styles are available separately with their scope clearly marked. The observed
-page preview toolbar exposed `Edit` and `Toggle Site Styles editing`; block edit
-forms and the section/block add, duplicate, reorder, and delete catalogs were
-not verified. Their mutation tools are not registered. An internal mutation
-guard schema is prepared for future work and requires a pre-change snapshot ID
-plus explicit confirmation. Operation-specific mutation methods and input
-schemas remain deferred until their live editor controls and save behavior are
-verified.
+page preview toolbar exposed `Edit` and `Toggle Site Styles editing`. The
+`add_text_section` workflow uses the verified **Add a Section** / **Add Blank**,
+**Add Block** / **Text**, **Write**, **Edit Section** / **Colors** / **Aa Light
+1**, and **Text Color** / **Custom** / **Hex** controls. It is restricted to the
+Kausar Mia site and Home page. All other section/block mutations remain
+unavailable.
+
+Squarespace Save has not been verified to preserve a draft on a published page.
+Consequently, `add_text_section` requires the caller to set
+`confirm_potentially_live_save` to `true` for every invocation. This is explicit
+approval that Save may make the requested content live. The tool never clicks
+Publish, and it refuses to begin if the site/page identity or fresh backup
+verification fails. Do not invoke it unless this approval is intended.
 
 Backups are stored under the project-local `backups/` directory, which is
 git-ignored:
@@ -225,13 +285,12 @@ screenshots, not a restorable Squarespace export. UUID filenames and exclusive
 file creation prevent accidental overwrite. `list_snapshots` returns local
 metadata; `get_snapshot` validates and returns a saved JSON snapshot.
 
-Block-specific editing, section mutations, Custom CSS, Custom Code, and
-header/footer customization are not available as MCP tools. Page
-create/update/move/delete and save/publish
-operations are also intentionally not registered. Local snapshot creation
-writes only under `backups/`; no registered tool can modify, delete, save, or
-publish website content. Mutating methods retained internally in the browser
-service are not reachable through MCP registration.
+Block-specific editing beyond the single `add_text_section` workflow, other
+section mutations, Custom CSS, Custom Code, and header/footer customization
+are not available as MCP tools. Page create/update/move/delete and explicit
+publish operations are also intentionally not registered. The guarded
+`add_text_section` tool is the only registered operation that can save website
+content.
 
 Page types are reported conservatively as `folder` or `page`, based on the
 observed folder controls. A page's enabled/disabled status is `unknown` when
@@ -297,6 +356,7 @@ timezone, favicon, social links, or any other live Squarespace content.
 - `npm test` — run browser, Pages inspection, and MCP tool tests
 - `npm start` — run the compiled entry point
 
-Strict TypeScript checks are enabled in `tsconfig.json`. The inspection and
-creation tools use the visible Squarespace interface; no Squarespace API calls
-are made.
+Strict TypeScript checks are enabled in `tsconfig.json`. The page/design tools use the visible Squarespace interface. The commerce tools
+use the official APIs documented at
+[Squarespace Commerce APIs](https://developers.squarespace.com/commerce-apis/overview)
+and do not make live changes.

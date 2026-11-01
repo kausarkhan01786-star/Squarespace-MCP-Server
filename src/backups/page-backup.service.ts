@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, unlink } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { access, mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Page } from "playwright";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
@@ -320,6 +320,68 @@ export class PageBackupService {
 
   async getSnapshot(snapshotId: string): Promise<PageSnapshot> {
     return this.readSnapshot(snapshotId);
+  }
+
+  async verifyFreshSnapshot(
+    snapshotId: string,
+    websiteId: string,
+    pageId: string,
+    createdAfter: Date,
+  ): Promise<PageSnapshot> {
+    const snapshot = await this.getSnapshot(snapshotId);
+    const createdAt = Date.parse(snapshot.createdAt);
+    if (
+      snapshot.website.id !== websiteId ||
+      snapshot.page.id !== pageId ||
+      !Number.isFinite(createdAt) ||
+      createdAt < createdAfter.getTime() ||
+      createdAt > this.now().getTime()
+    ) {
+      throw new SquarespaceBrowserError(
+        "SNAPSHOT_VERIFICATION_FAILED",
+        "The backup is stale or does not match the requested website and page.",
+      );
+    }
+
+    const capturedScreenshots = snapshot.screenshots.filter(
+      (screenshot) => screenshot.status === "captured",
+    );
+    if (!capturedScreenshots.some((screenshot) => screenshot.kind === "full_page")) {
+      throw new SquarespaceBrowserError(
+        "SNAPSHOT_VERIFICATION_FAILED",
+        "The fresh backup does not include a captured full-page screenshot.",
+      );
+    }
+
+    for (const screenshot of capturedScreenshots) {
+      const screenshotPath = resolve(this.backupDirectory, screenshot.path);
+      const relativePath = relative(this.backupDirectory, screenshotPath);
+      if (
+        isAbsolute(relativePath) ||
+        relativePath === ".." ||
+        relativePath.startsWith(`..${sep}`)
+      ) {
+        throw new SquarespaceBrowserError(
+          "SNAPSHOT_VERIFICATION_FAILED",
+          "A backup screenshot path escaped the configured backup directory.",
+        );
+      }
+      try {
+        await access(screenshotPath);
+        const screenshotStat = await stat(screenshotPath);
+        if (!screenshotStat.isFile() || screenshotStat.size === 0) {
+          throw new Error("The screenshot file is empty or not a regular file.");
+        }
+      } catch (error) {
+        throw new SquarespaceBrowserError(
+          "SNAPSHOT_VERIFICATION_FAILED",
+          "A screenshot referenced by the fresh backup is missing or unreadable.",
+          { cause: error },
+        );
+      }
+    }
+
+    return snapshot;
   }
 
   private async readSnapshot(snapshotId: string): Promise<PageSnapshot> {

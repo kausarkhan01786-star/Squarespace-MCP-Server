@@ -107,6 +107,15 @@ test("creates a sanitized JSON snapshot and associated full-page and section scr
     }
 
     assert.deepEqual(await fixture.backups.getSnapshot(snapshot.snapshotId), snapshot);
+    assert.deepEqual(
+      await fixture.backups.verifyFreshSnapshot(
+        snapshot.snapshotId,
+        website.id,
+        pageRecord.id,
+        new Date(Date.parse(snapshot.createdAt) - 1_000),
+      ),
+      snapshot,
+    );
     const listed = await fixture.backups.listSnapshots();
     assert.deepEqual(listed, [{
       snapshotId: snapshot.snapshotId,
@@ -117,6 +126,59 @@ test("creates a sanitized JSON snapshot and associated full-page and section scr
       pageUrl: "https://fixture.squarespace.com/services",
       screenshotCount: 3,
     }]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("refuses stale, mismatched, or incomplete backups before mutation", async () => {
+  const fixture = await createFixture();
+  try {
+    const snapshot = await fixture.backups.createPageSnapshot(website.id, pageRecord.id);
+    const createdAfter = new Date(Date.parse(snapshot.createdAt) - 1_000);
+
+    await assert.rejects(
+      () => fixture.backups.verifyFreshSnapshot(
+        snapshot.snapshotId,
+        "another-site",
+        pageRecord.id,
+        createdAfter,
+      ),
+      { code: "SNAPSHOT_VERIFICATION_FAILED" },
+    );
+    await assert.rejects(
+      () => fixture.backups.verifyFreshSnapshot(
+        snapshot.snapshotId,
+        website.id,
+        "another-page",
+        createdAfter,
+      ),
+      { code: "SNAPSHOT_VERIFICATION_FAILED" },
+    );
+    await assert.rejects(
+      () => fixture.backups.verifyFreshSnapshot(
+        snapshot.snapshotId,
+        website.id,
+        pageRecord.id,
+        new Date(Date.parse(snapshot.createdAt) + 1),
+      ),
+      { code: "SNAPSHOT_VERIFICATION_FAILED" },
+    );
+
+    const fullPageScreenshot = snapshot.screenshots.find(
+      (screenshot) => screenshot.kind === "full_page",
+    );
+    assert.ok(fullPageScreenshot);
+    await rm(join(fixture.backupDirectory, ...fullPageScreenshot.path.split("/")));
+    await assert.rejects(
+      () => fixture.backups.verifyFreshSnapshot(
+        snapshot.snapshotId,
+        website.id,
+        pageRecord.id,
+        createdAfter,
+      ),
+      { code: "SNAPSHOT_VERIFICATION_FAILED" },
+    );
   } finally {
     await fixture.close();
   }
