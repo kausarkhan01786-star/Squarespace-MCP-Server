@@ -423,9 +423,31 @@ Registered workflow tools:
 - `list_workflow_adapters` — report available CMS adapters and each operation's
   supported status/limitations.
 - `plan_squarespace_hero` — validate Hero content, styling, ordered element
-  positions, and desktop/mobile collision constraints. Returns a staged
-  **plan only**; it does not inspect/control the Agent's browser or mutate,
-  save, or publish a page.
+  positions, and return a staged **plan only**; it does not inspect/control the
+  Agent's browser or mutate, save, or publish a page.
+- `plan_squarespace_hero_operator` — requires the structured specification and
+  a specific `section_id`; returns a deterministic, fingerprinted native
+  Text/Button/Image block plan with a configurable action budget capped at 39.
+
+The operator engine executes its immutable plan in one pass: every driver
+method receives the same section ID, blocks are added through type-specific
+methods (never a generic Add Block method), responsive positions are applied
+as one batch, and measured desktop/mobile bounds are collision-checked once
+after placement. The current six-block plan estimates 16 browser actions. It
+records each browser-action duration and returns an
+ordered report with counts, status, collision findings, and explicit
+`saved: false` / `published: false` fields. It does not retry failed actions
+or attempt to save or publish.
+
+The engine is an orchestration contract, not an authenticated shared-browser
+adapter. The VS Code Agent's browser tools can inspect and run Playwright
+against the shared page, but they do not expose an injectable `Page` or an
+execution API to this MCP process. No execution tool or Squarespace editor
+driver is registered; implementing one from the separate MCP browser session
+would assume shared authentication and is intentionally not done. The supplied
+section ID must identify an existing empty section; section creation is
+deliberately outside this block executor. Planning alone makes no website
+changes.
 
 The Hero specification separates content, styling, and desktop/mobile layout.
 The Agent remains the only controller of the VS Code shared browser. MCP does
@@ -436,20 +458,11 @@ and sanitized evidence references. Operations move from planned to executed
 and then visually verified only when the Agent reports the corresponding
 evidence. Duplicate content in the inspected target section blocks creation.
 
-Editor operations observed in the earlier shared-browser session are eligible
-only for a **controlled live test**, not established as reliable reusable
-mutations. The plan currently labels blank-section creation, Text-block
-creation/text entry (`Add Block` → `Text`, then `Write`), and Button-block
-creation (`Add Block` → `Button`) as observed once; adding the section used
-`Add Section` → `Add Blank`. These controls are not exposed as MCP mutations,
-and must be performed by the Agent directly in the authenticated shared
-browser. The previous attempt's two buttons overlapped, so reliable positioning
-is explicitly unsupported. Image/visual creation, arbitrary typography/spacing
-mapping, mobile-specific layout, and draft-only Save are also unsupported until
-their actual controls and outcomes are verified. Browser-action counts are only
-meaningful if the Agent runtime exposes and records each action through the
-execution session. No complete Hero builder or three-minute performance is
-claimed.
+The existing staged Hero planner and `add_text_section` tool remain separate
+from this operator contract. Previously observed editor controls are not
+treated as proof that a reusable shared-browser adapter exists. A native
+operator plan is not evidence that the site was edited; live execution,
+section creation, and Save/Publish remain unavailable through this MCP server.
 
 The Squarespace adapter currently executes only verified operations:
 

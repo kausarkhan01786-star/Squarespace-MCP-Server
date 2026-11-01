@@ -91,6 +91,34 @@ test("registers a read-only Hero planner and returns a plan without editing a we
     assert.equal(payload.result.saved, false);
     assert.equal(payload.result.published, false);
     assert.equal(payload.result.boundary, "Agent-controlled shared browser; no MCP browser bridge");
+
+    const operatorTool = listed.tools.find((candidate) =>
+      candidate.name === "plan_squarespace_hero_operator");
+    assert.ok(operatorTool);
+    assert.equal(operatorTool.annotations?.readOnlyHint, true);
+    const operatorSpecification = structuredClone(specification);
+    operatorSpecification.content.visual = {
+      kind: "image",
+      assetId: "hero-portrait",
+      description: "Professional portrait",
+    };
+    const operatorResult = await client.callTool({
+      name: "plan_squarespace_hero_operator",
+      arguments: {
+        specification: operatorSpecification,
+        section_id: "section-42",
+      },
+    });
+    assert.equal(operatorResult.isError, undefined);
+    const operatorPayload = JSON.parse(
+      operatorResult.content[0]?.type === "text" ? operatorResult.content[0].text : "{}",
+    );
+    assert.equal(operatorPayload.result.sectionId, "section-42");
+    assert.equal(operatorPayload.result.maxBrowserActions, 39);
+    assert.deepEqual(
+      operatorPayload.result.blocks.map((block: { type: string }) => block.type),
+      ["Text", "Text", "Text", "Button", "Button", "Image"],
+    );
   } finally {
     await client.close();
     await server.close();
