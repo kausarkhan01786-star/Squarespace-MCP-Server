@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { PageBackupService } from "./backups/page-backup.service.js";
 import { SquarespaceBrowserService } from "./browser/squarespace-browser.service.js";
+import { PlaywrightBrowserProvider } from "./browser/playwright-browser.provider.js";
 import { SquarespaceContentService } from "./browser/squarespace-content.service.js";
 import { SquarespaceCommerceProvider } from "./commerce/squarespace-commerce.provider.js";
 import { SquarespaceCommerceService } from "./commerce/squarespace-commerce.service.js";
@@ -20,6 +21,7 @@ import { WebsiteWorkflowService } from "./workflow/website-workflow.service.js";
 async function main(): Promise<void> {
   const browser = new SquarespaceBrowserService();
   const pages = new SquarespacePagesService(browser);
+  const browserProvider = new PlaywrightBrowserProvider(browser, pages);
   const design = new SquarespaceDesignService(browser, pages);
   const navigationSeoSettings =
     new SquarespaceNavigationSeoSettingsService(browser, pages);
@@ -36,7 +38,7 @@ async function main(): Promise<void> {
   const commerce = new SquarespaceCommerceService(browser, commerceProvider);
   const workflow = new WebsiteWorkflowService(new Map([
     ["squarespace", new SquarespaceWorkflowAdapter({
-      browser,
+      browserProvider,
       pages,
       design,
       settings: navigationSeoSettings,

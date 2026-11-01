@@ -27,6 +27,17 @@ cp .env.example .env
 The MCP server uses stdio transport. The browser launches only when a browser
 tool is called, not when the MCP process starts.
 
+## VS Code MCP registration
+
+The workspace configuration at `.vscode/mcp.json` starts the compiled server
+with `node ${workspaceFolder}/dist/index.js`. Build first with `npm run build`
+from the workspace root. The MCP process inherits its environment from VS
+Code; this configuration does not include credentials or select a browser
+profile. Commerce API calls require `SQUARESPACE_API_KEY` and
+`SQUARESPACE_SITE_ID` in the process environment. Browser operations require
+their own verified persistent profile and authentication, and are not bridged
+to the VS Code shared browser.
+
 ## Architecture
 
 ```text
@@ -34,7 +45,7 @@ src/
   index.ts       Application composition and process entry point
   auth/          Credential and authenticated-session handling
   api/           Reserved for API clients
-  browser/       Persistent Playwright session and page inspection/mutations
+  browser/       BrowserProvider contract, Playwright provider, and Squarespace UI services
   commerce/      Commerce provider abstraction and Squarespace API adapter
   workflow/      CMS-independent workflow contracts, engine, and Squarespace adapter
   config/        Environment parsing and validated application settings
@@ -44,8 +55,19 @@ src/
 
 The intended request flow is: MCP client → validated tool input → API client
 where an official API supports the operation, otherwise an explicit browser
-workflow → normalized result or actionable error. Keeping these integrations
-separate makes API coverage and browser-dependent behavior clear and testable.
+workflow → normalized result or actionable error. Browser operations are
+expressed through a CMS-independent `BrowserProvider`; the current
+`PlaywrightBrowserProvider` adapts the existing Squarespace Playwright service.
+Squarespace-specific selectors remain in the Squarespace browser services, and
+Commerce API operations remain in the Commerce provider.
+
+The VS Code shared browser is a separate host integration. The Agent may
+operate that authenticated browser directly and pass sanitized evidence to MCP
+tools, but this MCP server has no documented API or bridge to invoke those
+browser actions. The provider abstraction does not expose Playwright pages or
+contexts, cookies, storage state, credentials, or arbitrary page evaluation.
+Capabilities that a provider does not implement return an explicit
+`unsupported` result; no shared-browser connection is implied.
 
 ## Configuration and credentials
 

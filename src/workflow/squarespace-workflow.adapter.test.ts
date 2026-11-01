@@ -9,15 +9,15 @@ const website = {
   url: "https://example.squarespace.com",
 };
 
-function createAdapter() {
+function createAdapter(browserProvider = {
+  verifyWebsite: async (websiteId: string) => {
+    if (websiteId !== website.id) throw new Error("Unlisted website.");
+    return { status: "supported" as const, data: website };
+  },
+}) {
   const calls: Array<{ action: string; args: unknown[] }> = [];
   const services = {
-    browser: {
-      getWebsite: (websiteId: string) => {
-        if (websiteId !== website.id) throw new Error("Unlisted website.");
-        return website;
-      },
-    },
+    browserProvider,
     pages: {
       listPages: async (...args: unknown[]) => {
         calls.push({ action: "listPages", args });
@@ -151,4 +151,18 @@ test("refuses unsupported actions and unverified websites without platform fallb
   const { adapter } = createAdapter();
   await assert.rejects(adapter.execute("create_page", website.id, task("create_page")));
   await assert.rejects(adapter.verifyWebsite("unknown"));
+});
+
+test("fails explicitly when the workflow's browser provider is unavailable", async () => {
+  const { adapter } = createAdapter({
+    verifyWebsite: async () => ({
+      status: "unsupported",
+      capability: "verify_website",
+      reason: "No browser provider is connected.",
+    }),
+  });
+  await assert.rejects(adapter.verifyWebsite(website.id), {
+    code: "BROWSER_CAPABILITY_UNAVAILABLE",
+    message: "Cannot verify the selected website: No browser provider is connected.",
+  });
 });

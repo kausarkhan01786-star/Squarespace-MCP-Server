@@ -1,6 +1,5 @@
-import { assertAllowedSquarespaceUrl } from "../browser/browser-security.js";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
-import type { SquarespaceBrowserService } from "../browser/squarespace-browser.service.js";
+import type { BrowserProvider } from "../browser/browser-provider.js";
 import type { PageBackupService } from "../backups/page-backup.service.js";
 import type { SquarespaceCommerceService } from "../commerce/squarespace-commerce.service.js";
 import type { SquarespaceContentService } from "../browser/squarespace-content.service.js";
@@ -15,7 +14,7 @@ import type {
 } from "./workflow-types.js";
 
 type WorkflowServices = {
-  browser: SquarespaceBrowserService;
+  browserProvider: BrowserProvider;
   pages: SquarespacePagesService;
   design: SquarespaceDesignService;
   settings: SquarespaceNavigationSeoSettingsService;
@@ -195,17 +194,30 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
     name: string;
     url: string;
   }> {
-    const website = this.services.browser.getWebsite(websiteId);
+    let result: Awaited<ReturnType<BrowserProvider["verifyWebsite"]>>;
     try {
-      assertAllowedSquarespaceUrl(website.url);
+      result = await this.services.browserProvider.verifyWebsite(websiteId);
     } catch (error) {
+      if (error instanceof SquarespaceBrowserError && error.code === "INVALID_URL") {
+        throw new SquarespaceBrowserError(
+          "WORKFLOW_CMS_UNAVAILABLE",
+          "The selected website URL is not an allowed Squarespace website. No platform switching is permitted.",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    if (result.status === "unsupported") {
       throw new SquarespaceBrowserError(
-        "WORKFLOW_CMS_UNAVAILABLE",
-        "The selected website URL is not an allowed Squarespace website. No platform switching is permitted.",
-        { cause: error },
+        "BROWSER_CAPABILITY_UNAVAILABLE",
+        `Cannot verify the selected website: ${result.reason}`,
       );
     }
-    return { id: website.id, name: website.name, url: website.url };
+    return {
+      id: result.data.id,
+      name: result.data.name,
+      url: result.data.url,
+    };
   }
 
   async execute(
