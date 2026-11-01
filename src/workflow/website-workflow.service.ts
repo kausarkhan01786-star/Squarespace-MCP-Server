@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import { ExecutionController, ExecutionStoppedError } from "../execution/execution-controller.js";
+import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
 import {
   analyzeRequirementsInputSchema,
   approveWorkflowTasksInputSchema,
@@ -22,6 +24,7 @@ type WorkflowAdapterRegistry = ReadonlyMap<string, WorkflowAdapter>;
 export class WebsiteWorkflowService {
   private readonly workflows = new Map<string, WebsiteWorkflow>();
   private readonly runningWorkflows = new Set<string>();
+  private readonly cancellationControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly adapters: WorkflowAdapterRegistry,
@@ -261,6 +264,7 @@ export class WebsiteWorkflowService {
       toolName: string | null;
       result: unknown;
     }>;
+    executionMetrics: ExecutionMetrics;
     tasks: ReturnType<WebsiteWorkflowService["getWorkflowStatus"]>["tasks"];
   }> {
     const input = executeWorkflowInputSchema.parse(rawInput);
@@ -279,6 +283,14 @@ export class WebsiteWorkflowService {
       );
     }
     this.runningWorkflows.add(workflow.id);
+    const cancellation = new AbortController();
+    this.cancellationControllers.set(workflow.id, cancellation);
+    const controller = new ExecutionController({
+      timeoutMs: input.timeout_ms,
+      maxBrowserActions: input.max_browser_actions,
+      signal: cancellation.signal,
+      now: () => this.now().getTime(),
+    });
     const executedTaskIds: string[] = [];
     const executedTasks: Array<{
       taskId: string;
@@ -286,8 +298,14 @@ export class WebsiteWorkflowService {
       toolName: string | null;
       result: unknown;
     }> = [];
+    const retryTaskIds = new Set<string>();
+    let executionStatus: ExecutionMetrics["status"] = "succeeded";
     try {
+      controller.startStage("website_verification");
+      controller.checkpoint();
       const verifiedWebsite = await adapter.verifyWebsite(workflow.website.id);
+      controller.endStage("website_verification");
+      controller.checkpoint();
       if (
         verifiedWebsite.id !== workflow.website.id ||
         verifiedWebsite.url !== workflow.website.url
@@ -303,20 +321,31 @@ export class WebsiteWorkflowService {
           if (task.status === "failed" && task.readOnly && task.retrySafe) {
             task.status = "pending";
             delete task.error;
+            retryTaskIds.add(task.id);
           }
         }
       }
       workflow.status = "running";
       workflow.updatedAt = this.now().toISOString();
       for (const task of workflow.tasks) {
+        controller.checkpoint();
         if (executedTaskIds.length >= input.max_tasks) break;
         if (task.status === "unsupported" || task.status === "succeeded") continue;
-        if (task.status === "failed" || task.status === "running") break;
+        if (task.status === "interrupted") {
+          executionStatus = "interrupted";
+          workflow.status = "interrupted";
+          break;
+        }
+        if (
+          task.status === "failed" ||
+          task.status === "running"
+        ) break;
         if (task.approvalRequired && !task.approved) {
           task.status = "blocked";
           task.error = "Explicit approval for this exact task is required before execution.";
           break;
         }
+        if (retryTaskIds.delete(task.id)) controller.recordRetry();
         task.status = "running";
         task.attempts += 1;
         workflow.updatedAt = this.now().toISOString();
@@ -325,8 +354,15 @@ export class WebsiteWorkflowService {
           taskId: task.id,
           action: task.action,
         });
+        controller.startStage("workflow_task");
         try {
-          task.result = await adapter.execute(task.action, workflow.website.id, task.args);
+          task.result = await adapter.execute(
+            task.action,
+            workflow.website.id,
+            task.args,
+            { browser: controller, signal: cancellation.signal },
+          );
+          controller.checkpoint();
           task.status = "succeeded";
           delete task.error;
           executedTaskIds.push(task.id);
@@ -342,6 +378,19 @@ export class WebsiteWorkflowService {
             action: task.action,
           });
         } catch (error) {
+          controller.endStage("workflow_task");
+          if (error instanceof ExecutionStoppedError) {
+            executionStatus = error.reason === "cancelled"
+              ? "cancelled"
+              : error.reason === "timed_out"
+                ? "timed_out"
+                : "interrupted";
+            task.status = "interrupted";
+            task.error = error.message;
+            workflow.status = executionStatus;
+            break;
+          }
+          executionStatus = "failed";
           task.status = "failed";
           task.error = safeErrorMessage(error);
           workflow.status = "failed";
@@ -352,12 +401,39 @@ export class WebsiteWorkflowService {
             code: error instanceof SquarespaceBrowserError ? error.code : "UNEXPECTED_ERROR",
           });
           break;
+        } finally {
+          controller.endStage("workflow_task");
         }
       }
+    } catch (error) {
+      if (error instanceof ExecutionStoppedError) {
+        executionStatus = error.reason === "cancelled"
+          ? "cancelled"
+          : error.reason === "timed_out"
+            ? "timed_out"
+            : "interrupted";
+        workflow.status = executionStatus;
+      } else {
+        executionStatus = "failed";
+        workflow.status = "failed";
+        throw error;
+      }
     } finally {
+      controller.endStage("website_verification");
       this.runningWorkflows.delete(workflow.id);
+      this.cancellationControllers.delete(workflow.id);
       workflow.updatedAt = this.now().toISOString();
-      workflow.status = deriveStatus(workflow.tasks, workflow.status === "failed");
+      if (
+        executionStatus === "succeeded" ||
+        executionStatus === "failed"
+      ) {
+        workflow.status = deriveStatus(workflow.tasks, executionStatus === "failed");
+      }
+      workflow.executionMetrics = controller.finish(executionStatus);
+      console.info("[workflow execution metrics]", {
+        workflowId: workflow.id,
+        ...workflow.executionMetrics,
+      });
     }
 
     return {
@@ -365,7 +441,30 @@ export class WebsiteWorkflowService {
       status: workflow.status,
       executedTaskIds,
       executedTasks,
+      executionMetrics: workflow.executionMetrics ?? controller.finish(executionStatus),
       tasks: this.getWorkflowStatus(workflow.id).tasks,
+    };
+  }
+
+  cancelWorkflow(workflowId: string): {
+    workflowId: string;
+    cancellationRequested: boolean;
+    status: WebsiteWorkflow["status"];
+  } {
+    const workflow = this.requireWorkflow(workflowId);
+    const controller = this.cancellationControllers.get(workflowId);
+    if (!controller) {
+      return {
+        workflowId,
+        cancellationRequested: false,
+        status: workflow.status,
+      };
+    }
+    controller.abort();
+    return {
+      workflowId,
+      cancellationRequested: true,
+      status: workflow.status,
     };
   }
 
@@ -377,6 +476,7 @@ export class WebsiteWorkflowService {
     fingerprint: string;
     createdAt: string;
     updatedAt: string;
+    executionMetrics: ExecutionMetrics | null;
     tasks: Array<{
       id: string;
       action: WorkflowAction;
@@ -399,6 +499,7 @@ export class WebsiteWorkflowService {
       fingerprint: workflow.fingerprint,
       createdAt: workflow.createdAt,
       updatedAt: workflow.updatedAt,
+      executionMetrics: workflow.executionMetrics ?? null,
       tasks: workflow.tasks.map((task) => ({
         id: task.id,
         action: task.action,
@@ -578,6 +679,7 @@ function toTaskSummary(task: WorkflowTask): {
 
 function deriveStatus(tasks: WorkflowTask[], failed: boolean): WebsiteWorkflow["status"] {
   if (failed || tasks.some((task) => task.status === "failed")) return "failed";
+  if (tasks.some((task) => task.status === "interrupted")) return "interrupted";
   if (tasks.some((task) => task.status === "running")) return "running";
   if (tasks.some((task) => task.status === "blocked")) return "awaiting_approval";
   if (tasks.some((task) => task.status === "pending")) {

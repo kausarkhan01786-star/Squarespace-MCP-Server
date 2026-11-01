@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
+import type { BrowserExecutionContext } from "../browser/browser-execution-context.js";
 
 const textListSchema = z.array(z.string().trim().min(1).max(500)).max(50);
 
@@ -149,6 +151,8 @@ export const planWebsiteWorkflowInputSchema = z.object({
 export const executeWorkflowInputSchema = z.object({
   workflow_id: z.string().uuid(),
   max_tasks: z.number().int().min(1).max(10).default(1),
+  timeout_ms: z.number().int().min(1_000).max(600_000).default(180_000),
+  max_browser_actions: z.number().int().min(1).max(500).default(100),
   retry_failed_read_only: z.boolean().default(false),
 }).strict();
 
@@ -184,6 +188,7 @@ export type WorkflowTaskStatus =
   | "running"
   | "succeeded"
   | "failed"
+  | "interrupted"
   | "blocked"
   | "unsupported";
 
@@ -193,7 +198,10 @@ export type WorkflowStatus =
   | "awaiting_approval"
   | "completed"
   | "partial"
-  | "failed";
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "interrupted";
 
 export interface WorkflowCapability {
   action: WorkflowAction;
@@ -222,7 +230,13 @@ export interface WorkflowAdapter {
     action: WorkflowAction,
     websiteId: string,
     args: PlannedTaskInput,
+    execution?: WorkflowExecutionContext,
   ): Promise<unknown>;
+}
+
+export interface WorkflowExecutionContext {
+  browser: BrowserExecutionContext;
+  signal: AbortSignal;
 }
 
 export interface WorkflowTask {
@@ -253,6 +267,7 @@ export interface WebsiteWorkflow {
   status: WorkflowStatus;
   createdAt: string;
   updatedAt: string;
+  executionMetrics?: ExecutionMetrics;
 }
 
 export interface WorkflowQaReport {

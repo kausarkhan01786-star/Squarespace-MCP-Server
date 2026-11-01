@@ -405,15 +405,51 @@ Registered workflow tools:
   that approval from the user; a boolean supplied by an unattended model is
   not proof of human consent.
 - `execute_website_workflow` — requires a workflow ID; `max_tasks` is 1–10
-  (default 1). Tasks execute in plan order, one at a time. Previously completed
-  tasks are not repeated. It returns each just-completed task's structured tool
-  result so the host agent can inspect evidence. Retry is opt-in and limited to
-  failed tasks declared both read-only and retry-safe; mutations are never
-  retried automatically.
+  (default 1), `timeout_ms` is 1,000–600,000 (default 180,000), and
+  `max_browser_actions` is 1–500 (default 100). Tasks execute in plan order,
+  one at a time. Results and status include sanitized duration, instrumented
+  browser actions, DOM inspections, screenshots, explicit waits, retries,
+  per-stage durations, and execution status. Timeout and cancellation are
+  cooperative at safe checkpoints; an in-progress mutation is marked
+  interrupted and must be inspected before any later attempt.
+- `cancel_website_workflow` — requests cooperative cancellation by workflow ID.
+  It does not roll back an in-progress mutation or imply that it did not take
+  effect.
+- Previously completed tasks are not repeated. Retry is opt-in and limited to
+  failed tasks declared both read-only and retry-safe; interrupted mutations
+  are never automatically replayed.
 - `get_workflow_status` and `get_workflow_qa_report` — inspect task execution
   and evidence-based QA status.
 - `list_workflow_adapters` — report available CMS adapters and each operation's
   supported status/limitations.
+- `plan_squarespace_hero` — validate Hero content, styling, ordered element
+  positions, and desktop/mobile collision constraints. Returns a staged
+  **plan only**; it does not inspect/control the Agent's browser or mutate,
+  save, or publish a page.
+
+The Hero specification separates content, styling, and desktop/mobile layout.
+The Agent remains the only controller of the VS Code shared browser. MCP does
+not expose an undocumented bridge or assume that its persistent Playwright
+session is authenticated as the Agent. A Hero execution session can collect
+stage timings, action counts when the Agent runtime exposes them, cancellation,
+and sanitized evidence references. Operations move from planned to executed
+and then visually verified only when the Agent reports the corresponding
+evidence. Duplicate content in the inspected target section blocks creation.
+
+Editor operations observed in the earlier shared-browser session are eligible
+only for a **controlled live test**, not established as reliable reusable
+mutations. The plan currently labels blank-section creation, Text-block
+creation/text entry (`Add Block` → `Text`, then `Write`), and Button-block
+creation (`Add Block` → `Button`) as observed once; adding the section used
+`Add Section` → `Add Blank`. These controls are not exposed as MCP mutations,
+and must be performed by the Agent directly in the authenticated shared
+browser. The previous attempt's two buttons overlapped, so reliable positioning
+is explicitly unsupported. Image/visual creation, arbitrary typography/spacing
+mapping, mobile-specific layout, and draft-only Save are also unsupported until
+their actual controls and outcomes are verified. Browser-action counts are only
+meaningful if the Agent runtime exposes and records each action through the
+execution session. No complete Hero builder or three-minute performance is
+claimed.
 
 The Squarespace adapter currently executes only verified operations:
 
@@ -445,6 +481,24 @@ a fresh snapshot/screenshots, checks site and Home-page identity, verifies the
 result, and never clicks Publish. Other page creation/editing, arbitrary block
 or design changes, navigation changes, custom code, commerce writes, order
 changes, discounts, and publishing are unsupported and are not executed.
+
+The CMS-neutral batch-operation contract can represent section, text, button,
+image, style, and layout operations while keeping planned, supported, executed,
+verified, unsupported, and failed operations distinct. It is a planning/result
+model only; it does not make Squarespace expose those actions. The reusable
+layout validator checks supplied desktop/mobile element rectangles for overlap
+and section-boundary violations, but no current Squarespace builder supplies
+those measurements or executes a multi-element Hero batch. Do not treat a
+batch as successful until each supported operation is executed and its result
+is independently verified.
+
+Workflow cancellation and deadlines are cooperative, not browser-process
+termination. Cancellation is observed between UI actions and in bounded editor
+waits. If a mutation is interrupted, its task remains interrupted and is not
+replayed by a subsequent execute call; inspect the actual website state before
+planning a new attempt. Execution telemetry contains only counts, durations,
+stage names, task IDs/actions, and status—never page text, credentials, cookies,
+or browser storage.
 
 Workflow plans and results are held in memory and disappear when the MCP server
 restarts. The service does not persist client briefs. QA reports distinguish

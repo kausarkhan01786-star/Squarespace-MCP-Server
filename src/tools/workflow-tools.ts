@@ -63,7 +63,7 @@ export function registerWorkflowTools(
   server.registerTool(
     "execute_website_workflow",
     {
-      description: "Execute available approved workflow tasks serially. Mutations require task-specific approval, have no automatic retry, and are never published automatically.",
+      description: "Execute available approved workflow tasks serially within the requested deadline and browser-action budget. Mutations require task-specific approval, are never automatically replayed after interruption, and are never published automatically.",
       inputSchema: executeWorkflowInputSchema,
       outputSchema,
       annotations: {
@@ -76,6 +76,24 @@ export function registerWorkflowTools(
     async (input) =>
       runTool("execute_website_workflow", () =>
         workflow.executeWorkflow(input)),
+  );
+
+  server.registerTool(
+    "cancel_website_workflow",
+    {
+      description: "Request cooperative cancellation at the next safe workflow checkpoint. An in-progress mutation is not automatically replayed and may require website-state inspection.",
+      inputSchema: workflowIdInputSchema,
+      outputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ workflow_id }) =>
+      runTool("cancel_website_workflow", async () =>
+        workflow.cancelWorkflow(workflow_id)),
   );
 
   server.registerTool(

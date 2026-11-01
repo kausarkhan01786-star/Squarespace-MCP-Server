@@ -15,6 +15,7 @@ import { registerCommerceTools } from "./tools/commerce-tools.js";
 import { registerNavigationSeoSettingsTools } from "./tools/navigation-seo-settings-tools.js";
 import { registerPagesTools } from "./tools/pages-tools.js";
 import { registerWorkflowTools } from "./tools/workflow-tools.js";
+import { registerHeroTools } from "./tools/hero-tools.js";
 import { SquarespaceWorkflowAdapter } from "./workflow/squarespace-workflow.adapter.js";
 import { WebsiteWorkflowService } from "./workflow/website-workflow.service.js";
 
@@ -59,6 +60,7 @@ async function main(): Promise<void> {
   registerCommerceTools(server, commerce);
   registerNavigationSeoSettingsTools(server, navigationSeoSettings);
   registerWorkflowTools(server, workflow);
+  registerHeroTools(server);
   transport.onclose = () => {
     void browser.close().catch((error: unknown) => {
       console.error("Could not close the Squarespace browser cleanly.", error);

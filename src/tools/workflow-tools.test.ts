@@ -40,6 +40,7 @@ test("registers the complete workflow MCP surface", () => {
     "plan_website_workflow",
     "approve_workflow_tasks",
     "execute_website_workflow",
+    "cancel_website_workflow",
     "get_workflow_status",
     "get_workflow_qa_report",
     "list_workflow_adapters",
@@ -79,6 +80,10 @@ test("serves workflow discovery and requirement analysis over MCP protocol", asy
     assert.ok(listed.tools.some((tool) => tool.name === "analyze_client_requirements"));
     assert.ok(listed.tools.some((tool) => tool.name === "plan_website_workflow"));
     assert.ok(listed.tools.some((tool) => tool.name === "execute_website_workflow"));
+    assert.ok(listed.tools.some((tool) => tool.name === "cancel_website_workflow"));
+    const executionTool = listed.tools.find((tool) => tool.name === "execute_website_workflow");
+    assert.ok(executionTool?.inputSchema.properties.timeout_ms);
+    assert.ok(executionTool?.inputSchema.properties.max_browser_actions);
 
     const analysis = await client.callTool({
       name: "analyze_client_requirements",

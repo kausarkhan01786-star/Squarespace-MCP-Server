@@ -11,6 +11,7 @@ import type {
   WorkflowAction,
   WorkflowAdapter,
   WorkflowCapability,
+  WorkflowExecutionContext,
 } from "./workflow-types.js";
 
 type WorkflowServices = {
@@ -224,6 +225,7 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
     action: WorkflowAction,
     websiteId: string,
     args: PlannedTaskInput,
+    execution?: WorkflowExecutionContext,
   ): Promise<unknown> {
     const website = await this.verifyWebsite(websiteId);
     const pageId = args.page_id;
@@ -277,7 +279,7 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
           background_color: "#FFFFFF",
           text_color: "#000000",
           confirm_potentially_live_save: args.confirm_potentially_live_save,
-        });
+        }, execution?.browser);
       default:
         throw new SquarespaceBrowserError(
           "WORKFLOW_CMS_UNAVAILABLE",

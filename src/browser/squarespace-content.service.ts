@@ -1,5 +1,11 @@
 import { z } from "zod";
 import type { Page, Frame, Locator } from "playwright";
+import {
+  ExecutionStoppedError,
+  type BrowserExecutionContext,
+} from "./browser-execution-context.js";
+import { ExecutionController } from "../execution/execution-controller.js";
+import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
 import type { PageBackupService, PageSnapshot } from "../backups/page-backup.service.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
 import {
@@ -61,7 +67,51 @@ export class SquarespaceContentService {
     this.assertHomePage(homePage, website, pageId);
   }
 
-  async addTextSection(rawInput: unknown): Promise<{
+  async addTextSection(
+    rawInput: unknown,
+    execution?: BrowserExecutionContext,
+  ): Promise<{
+    websiteId: string;
+    pageId: string;
+    text: string;
+    backgroundColor: "#FFFFFF";
+    textColor: "#000000";
+    backupSnapshotId: string;
+    screenshots: { before: string; after: string };
+    saved: true;
+    explicitPublishClicked: false;
+    verified: true;
+    executionMetrics?: ExecutionMetrics;
+  }> {
+    const ownedController = execution
+      ? undefined
+      : new ExecutionController({ timeoutMs: 180_000, maxBrowserActions: 100 });
+    const context = execution ?? ownedController!;
+    try {
+      const result = await this.runAddTextSection(rawInput, context);
+      if (!ownedController) return result;
+      const executionMetrics = ownedController.finish("succeeded");
+      console.info("[content execution metrics]", executionMetrics);
+      return { ...result, executionMetrics };
+    } catch (error) {
+      if (ownedController) {
+        const status = error instanceof ExecutionStoppedError
+          ? error.reason === "cancelled"
+            ? "cancelled"
+            : error.reason === "timed_out"
+              ? "timed_out"
+              : "interrupted"
+          : "failed";
+        console.info("[content execution metrics]", ownedController.finish(status));
+      }
+      throw error;
+    }
+  }
+
+  private async runAddTextSection(
+    rawInput: unknown,
+    execution: BrowserExecutionContext,
+  ): Promise<{
     websiteId: string;
     pageId: string;
     text: string;
@@ -83,10 +133,14 @@ export class SquarespaceContentService {
 
     const website = this.browser.getWebsite(input.website_id);
     this.assertConfirmedWebsite(website);
+    execution?.startStage("website_verification");
+    execution?.recordDomInspection();
     const homePage = await this.pages.getPageDetails(input.website_id, input.page_id);
     const homeUrl = this.assertHomePage(homePage, website, input.page_id);
+    execution?.endStage("website_verification");
 
     const backupStartedAt = new Date();
+    execution?.startStage("backup");
     const createdBackup = await this.backups.createPageSnapshot(
       input.website_id,
       input.page_id,
@@ -98,23 +152,39 @@ export class SquarespaceContentService {
       backupStartedAt,
     );
     this.assertSnapshotMatchesHome(backup, website, homePage, homeUrl);
+    execution?.recordScreenshot(
+      backup.screenshots.filter((screenshot) => screenshot.status === "captured").length,
+    );
+    execution?.endStage("backup");
 
     const editorUrl = new URL("/config/website", website.url).toString();
+    execution?.startStage("editor_setup");
+    execution?.checkpoint();
+    execution?.beforeBrowserAction();
     await this.browser.openWebsiteUrl(input.website_id, editorUrl);
     const page = await this.browser.getCurrentPage();
     await this.assertPageUrl(page, editorUrl);
+    execution?.recordDomInspection();
     await this.assertPublishedHomePreview(page);
-    await this.clickOne(page.getByRole("button", { name: "Edit", exact: true }), "Edit");
-    await this.waitForEditor(page);
+    await this.clickOne(
+      page.getByRole("button", { name: "Edit", exact: true }),
+      "Edit",
+      execution,
+    );
+    await this.waitForEditor(page, execution);
+    execution?.endStage("editor_setup");
 
+    execution?.startStage("section_creation");
+    execution?.recordDomInspection();
     const frame = await this.findHomeFrame(page, homeUrl);
     const sectionsBefore = frame.locator(SECTION_SELECTOR);
-    const initialSectionCount = await sectionsBefore.count();
+    const initialSectionCount = await this.inspectCount(sectionsBefore, execution);
     if (initialSectionCount !== backup.sections.length) {
       throw this.editorError(
         "The rendered Home section count does not match the fresh backup; no page content was changed.",
       );
     }
+    execution?.recordDomInspection();
     const observedSectionIds = await sectionsBefore.evaluateAll((sections) =>
       sections.map((section) => section.getAttribute("data-section-id")),
     );
@@ -127,65 +197,89 @@ export class SquarespaceContentService {
         "The rendered Home sections do not match the fresh backup; no page content was changed.",
       );
     }
+    execution?.beforeBrowserAction();
     await frame.locator("body").press("End");
+    execution?.recordDomInspection();
     const addSectionButtons = page.getByRole("button", {
       name: "Add Section",
       exact: true,
     });
-    const addSectionCount = await addSectionButtons.count();
+    const addSectionCount = await this.inspectCount(addSectionButtons, execution);
     if (addSectionCount < 1 || !(await addSectionButtons.last().isVisible())) {
       throw this.editorError("The Home editor did not expose an Add Section control.");
     }
-    await addSectionButtons.last().click();
+    await this.clickOne(addSectionButtons.last(), "Add Section", execution);
     const sectionDialog = page.getByRole("dialog", { name: "Add a Section", exact: true });
-    await sectionDialog.waitFor({ state: "visible", timeout: this.timeoutMs });
+    await this.waitForLocator(sectionDialog, { state: "visible", timeout: this.timeoutMs }, execution);
     const addBlank = sectionDialog.getByText("Add Blank", { exact: true });
-    await this.clickOne(addBlank, "Add Blank");
-    await sectionDialog.waitFor({ state: "hidden", timeout: this.timeoutMs });
-    await this.waitForCount(frame.locator(SECTION_SELECTOR), initialSectionCount + 1);
+    await this.clickOne(addBlank, "Add Blank", execution);
+    await this.waitForLocator(sectionDialog, { state: "hidden", timeout: this.timeoutMs }, execution);
+    await this.waitForCount(frame.locator(SECTION_SELECTOR), initialSectionCount + 1, execution);
     const newSection = frame.locator(SECTION_SELECTOR).last();
     const newSectionTextCells = newSection.getByRole("gridcell", {
       name: "Text",
       exact: true,
     });
-    if ((await newSectionTextCells.count()) !== 0) {
+    if ((await this.inspectCount(newSectionTextCells, execution)) !== 0) {
       throw this.editorError("The new blank section was not empty before adding its Text block.");
     }
-
+    execution?.beforeBrowserAction();
     await newSection.hover();
     await this.clickOne(
       page.getByRole("button", { name: "Add Block", exact: true }),
       "Add Block",
+      execution,
     );
     const blockSelector = page.getByRole("region", { name: "Block Selector", exact: true });
-    await blockSelector.waitFor({ state: "visible", timeout: this.timeoutMs });
+    await this.waitForLocator(blockSelector, { state: "visible", timeout: this.timeoutMs }, execution);
     await this.clickOne(
       blockSelector.getByRole("button", { name: "Text", exact: true }),
       "Text block",
+      execution,
     );
-    await blockSelector.waitFor({ state: "hidden", timeout: this.timeoutMs });
-    await this.waitForCount(newSectionTextCells, 1);
+    await this.waitForLocator(blockSelector, { state: "hidden", timeout: this.timeoutMs }, execution);
+    await this.waitForCount(newSectionTextCells, 1, execution);
     const newTextCell = newSectionTextCells.last();
+    execution?.beforeBrowserAction();
     await newTextCell.click();
-    await this.clickOne(page.getByRole("button", { name: "Write", exact: true }), "Write");
+    await this.clickOne(page.getByRole("button", { name: "Write", exact: true }), "Write", execution);
     const editableText = newTextCell.getByRole("textbox");
-    await editableText.waitFor({ state: "visible", timeout: this.timeoutMs });
+    await this.waitForLocator(editableText, { state: "visible", timeout: this.timeoutMs }, execution);
+    execution?.beforeBrowserAction();
     await editableText.fill(input.text);
+    execution?.beforeBrowserAction();
     await editableText.press("Control+A");
-    await this.applyBlackTextColor(page);
+    execution?.endStage("section_creation");
 
+    execution?.startStage("block_creation");
+    await this.applyBlackTextColor(page, execution);
+    execution?.endStage("block_creation");
+
+    execution?.startStage("style_application");
+    execution?.beforeBrowserAction();
     await newSection.hover();
-    await this.openSectionSettings(page);
-    await this.selectWhiteSectionTheme(page);
-    await this.assertSectionColors(newSection, input.text);
+    await this.openSectionSettings(page, execution);
+    await this.selectWhiteSectionTheme(page, execution);
+    await this.assertSectionColors(newSection, input.text, execution);
+    execution?.endStage("style_application");
 
-    const saveResult = await this.pages.savePageChanges(input.website_id);
+    execution?.startStage("save");
+    const saveResult = await this.pages.savePageChanges(
+      input.website_id,
+      false,
+      undefined,
+      execution,
+    );
+    execution?.checkpoint();
+    execution?.endStage("save");
     if (saveResult.published) {
       throw new SquarespaceBrowserError(
         "TEXT_SECTION_VERIFICATION_FAILED",
         "Squarespace reported that the operation published changes; no further editor actions were taken.",
       );
     }
+    execution?.startStage("result_verification");
+    execution?.recordDomInspection();
     const after = await this.pages.inspectPageSections(input.website_id, input.page_id);
     const lastSection = after.sections.at(-1);
     if (
@@ -201,7 +295,12 @@ export class SquarespaceContentService {
     }
     const renderedPage = await this.browser.getCurrentPage();
     const renderedFrame = await this.findHomeFrame(renderedPage, homeUrl);
-    await this.assertSectionColors(renderedFrame.locator(SECTION_SELECTOR).last(), input.text);
+    await this.assertSectionColors(
+      renderedFrame.locator(SECTION_SELECTOR).last(),
+      input.text,
+      execution,
+    );
+    execution?.endStage("result_verification");
 
     return {
       websiteId: input.website_id,
@@ -312,11 +411,21 @@ export class SquarespaceContentService {
     }
   }
 
-  private async waitForEditor(page: Page): Promise<void> {
-    await page.getByRole("button", { name: "Save", exact: true })
-      .waitFor({ state: "visible", timeout: this.timeoutMs });
-    await page.getByRole("button", { name: "Exit", exact: true })
-      .waitFor({ state: "visible", timeout: this.timeoutMs });
+  private async waitForEditor(
+    page: Page,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
+    await this.waitForLocator(
+      page.getByRole("button", { name: "Save", exact: true }),
+      { state: "visible", timeout: this.timeoutMs },
+      execution,
+    );
+    await this.waitForLocator(
+      page.getByRole("button", { name: "Exit", exact: true }),
+      { state: "visible", timeout: this.timeoutMs },
+      execution,
+    );
+    execution?.recordDomInspection();
     await this.assertPublishedHomePreview(page);
   }
 
@@ -336,43 +445,74 @@ export class SquarespaceContentService {
     return frame;
   }
 
-  private async applyBlackTextColor(page: Page): Promise<void> {
+  private async applyBlackTextColor(
+    page: Page,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
     await this.clickOne(
       page.getByRole("button", { name: "Text Color", exact: true }),
       "Text Color",
+      execution,
     );
-    await this.clickOne(page.getByRole("tab", { name: "Custom", exact: true }), "Custom color");
+    await this.clickOne(
+      page.getByRole("tab", { name: "Custom", exact: true }),
+      "Custom color",
+      execution,
+    );
     const hex = page.getByRole("spinbutton", { name: "Hex", exact: true });
-    if ((await hex.count()) !== 1) {
+    if ((await this.inspectCount(hex, execution)) !== 1) {
       throw this.editorError("The Text Color picker did not expose one Hex field.");
     }
+    execution?.beforeBrowserAction();
     await hex.fill("#000000");
+    execution?.beforeBrowserAction();
     await hex.press("Enter");
+    execution?.beforeBrowserAction();
     await page.keyboard.press("Escape");
   }
 
-  private async openSectionSettings(page: Page): Promise<void> {
+  private async openSectionSettings(
+    page: Page,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
     const settings = page.locator('button[aria-label="Open Section Settings"]:visible');
-    await this.clickOne(settings, "Open Section Settings");
-    await page.getByRole("dialog", { name: "Section editor form", exact: true })
-      .waitFor({ state: "visible", timeout: this.timeoutMs });
+    await this.clickOne(settings, "Open Section Settings", execution);
+    await this.waitForLocator(
+      page.getByRole("dialog", { name: "Section editor form", exact: true }),
+      { state: "visible", timeout: this.timeoutMs },
+      execution,
+    );
   }
 
-  private async selectWhiteSectionTheme(page: Page): Promise<void> {
+  private async selectWhiteSectionTheme(
+    page: Page,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
     await this.clickOne(
       page.getByRole("tab", { name: "Colors", exact: true }),
       "Section Colors",
+      execution,
     );
     await this.clickOne(
       page.getByRole("button", { name: "Aa Light 1", exact: true }),
       "Aa Light 1",
+      execution,
     );
+    execution?.beforeBrowserAction();
     await page.keyboard.press("Escape");
-    await page.getByRole("dialog", { name: "Section editor form", exact: true })
-      .waitFor({ state: "hidden", timeout: this.timeoutMs });
+    await this.waitForLocator(
+      page.getByRole("dialog", { name: "Section editor form", exact: true }),
+      { state: "hidden", timeout: this.timeoutMs },
+      execution,
+    );
   }
 
-  private async assertSectionColors(section: Locator, text: string): Promise<void> {
+  private async assertSectionColors(
+    section: Locator,
+    text: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
+    execution?.recordDomInspection();
     const colors = await section.evaluate((element, args) => {
       const block = Array.from(element.querySelectorAll<HTMLElement>(args.blockSelector))
         .find((candidate) => (candidate.innerText || "").trim() === args.expectedText);
@@ -395,22 +535,80 @@ export class SquarespaceContentService {
     }
   }
 
-  private async waitForCount(locator: Locator, expectedCount: number): Promise<void> {
-    const deadline = Date.now() + this.timeoutMs;
-    while (Date.now() < deadline) {
-      if (await locator.count() === expectedCount) {
-        return;
+  private async waitForCount(
+    locator: Locator,
+    expectedCount: number,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
+    try {
+      if (expectedCount > 0) {
+        await this.waitForLocator(
+          locator.nth(expectedCount - 1),
+          { state: "attached", timeout: this.timeoutMs },
+          execution,
+        );
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (await this.inspectCount(locator, execution) !== expectedCount) {
+        throw this.editorError("Squarespace created an unexpected number of sections or Text blocks.");
+      }
+    } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
+      if (error instanceof SquarespaceBrowserError) throw error;
+      throw this.editorError("Squarespace did not create the expected section or Text block.");
     }
-    throw this.editorError("Squarespace did not create the expected section or Text block.");
   }
 
-  private async clickOne(locator: Locator, label: string): Promise<void> {
+  private async clickOne(
+    locator: Locator,
+    label: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
+    execution?.recordDomInspection();
     if ((await locator.count()) !== 1 || !(await locator.isVisible()) || !(await locator.isEnabled())) {
       throw this.editorError(`Squarespace did not expose one visible, enabled ${label} control.`);
     }
-    await locator.click();
+    execution?.beforeBrowserAction();
+    await locator.click({
+      timeout: Math.max(
+        1,
+        Math.min(this.timeoutMs, execution?.remainingMs ?? this.timeoutMs),
+      ),
+    });
+  }
+
+  private async inspectCount(locator: Locator, execution?: BrowserExecutionContext): Promise<number> {
+    execution?.recordDomInspection();
+    return locator.count();
+  }
+
+  private async waitForLocator(
+    locator: Locator,
+    options: { state: "attached" | "detached" | "visible" | "hidden"; timeout: number },
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      execution?.checkpoint();
+      const wait = locator.waitFor({
+        ...options,
+        timeout: Math.max(
+          1,
+          Math.min(options.timeout, execution?.remainingMs ?? options.timeout),
+        ),
+      });
+      if (!execution) {
+        await wait;
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject(new ExecutionStoppedError("cancelled"));
+          execution.signal.addEventListener("abort", onAbort, { once: true });
+          wait.then(resolve, reject).finally(() =>
+            execution.signal.removeEventListener("abort", onAbort));
+        });
+      }
+    } finally {
+      execution?.recordExplicitWait(Date.now() - startedAt);
+    }
   }
 
   private editorError(message: string): SquarespaceBrowserError {

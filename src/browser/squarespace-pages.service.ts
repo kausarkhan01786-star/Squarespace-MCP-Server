@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Frame, Page } from "playwright";
+import type { BrowserExecutionContext } from "./browser-execution-context.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
 import { assertAllowedSquarespaceUrl } from "./browser-security.js";
 import type { SquarespaceBrowserService, WebsiteSummary } from "./squarespace-browser.service.js";
@@ -800,6 +801,7 @@ export class SquarespacePagesService {
     websiteId: string,
     publish = false,
     confirmation?: "PUBLISH",
+    execution?: BrowserExecutionContext,
   ): Promise<{
     success: true;
     saved: true;
@@ -819,10 +821,12 @@ export class SquarespacePagesService {
     }
 
     const screenshotId = randomUUID();
+    execution?.recordDomInspection();
     const beforeInspection = await this.inspectEditor(page);
     const beforeScreenshot = await this.browser.captureScreenshot(
       `save-page-changes-before-${screenshotId}.png`,
     );
+    execution?.recordScreenshot();
     const afterScreenshotName = `save-page-changes-after-${screenshotId}.png`;
     let actionAttempted = false;
     let afterScreenshotAttempted = false;
@@ -838,6 +842,7 @@ export class SquarespacePagesService {
         }
 
         actionAttempted = true;
+        execution?.beforeBrowserAction();
         await page.locator(EDITOR_ACTION_SELECTOR).nth(publishControl.index).click();
         await this.confirmPublishIfPrompted(page);
         await this.waitForEditorConfirmation(page, "published");
@@ -847,6 +852,8 @@ export class SquarespacePagesService {
           if (hasEditorConfirmation(beforeInspection, "saved")) {
             afterScreenshotAttempted = true;
             const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+            execution?.recordScreenshot();
+            execution?.recordDomInspection();
             const afterInspection = await this.inspectEditor(page);
             return {
               success: true,
@@ -864,10 +871,12 @@ export class SquarespacePagesService {
         }
 
         actionAttempted = true;
+        execution?.beforeBrowserAction();
         await page.locator(EDITOR_ACTION_SELECTOR).nth(saveControl.index).click();
-        await this.waitForEditorConfirmation(page, "saved");
+        await this.waitForEditorConfirmation(page, "saved", execution);
       }
 
+      execution?.recordDomInspection();
       const afterInspection = await this.inspectEditor(page);
       if (!hasEditorConfirmation(afterInspection, publish ? "published" : "saved")) {
         throw new SquarespaceBrowserError(
@@ -878,6 +887,7 @@ export class SquarespacePagesService {
 
       afterScreenshotAttempted = true;
       const afterScreenshot = await this.browser.captureScreenshot(afterScreenshotName);
+      execution?.recordScreenshot();
       return {
         success: true,
         saved: true,
@@ -891,6 +901,7 @@ export class SquarespacePagesService {
         afterScreenshotAttempted = true;
         try {
           await this.browser.captureScreenshot(afterScreenshotName);
+          execution?.recordScreenshot();
         } catch (screenshotError) {
           throw new SquarespaceBrowserError(
             "SCREENSHOT_FAILED",
@@ -1623,19 +1634,28 @@ export class SquarespacePagesService {
   private async waitForEditorConfirmation(
     page: Page,
     expected: "saved" | "published",
+    execution?: BrowserExecutionContext,
   ): Promise<void> {
-    const deadline = Date.now() + this.timeoutMs;
-    while (Date.now() < deadline) {
-      if (hasEditorConfirmation(await this.inspectEditor(page), expected)) {
-        return;
+    const startedAt = Date.now();
+    const deadline = Date.now() + Math.min(this.timeoutMs, execution?.remainingMs ?? this.timeoutMs);
+    try {
+      while (Date.now() < deadline) {
+        execution?.checkpoint();
+        execution?.recordDomInspection();
+        if (hasEditorConfirmation(await this.inspectEditor(page), expected)) {
+          return;
+        }
+        await delay(150);
       }
-      await delay(150);
-    }
 
-    throw new SquarespaceBrowserError(
-      "PAGE_SAVE_FAILED",
-      `Squarespace did not confirm that the changes were ${expected} before the operation timed out.`,
-    );
+      execution?.checkpoint();
+      throw new SquarespaceBrowserError(
+        "PAGE_SAVE_FAILED",
+        `Squarespace did not confirm that the changes were ${expected} before the operation timed out.`,
+      );
+    } finally {
+      execution?.recordExplicitWait(Date.now() - startedAt);
+    }
   }
 
   private async readGroupLabels(

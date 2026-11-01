@@ -82,11 +82,11 @@ function capability(
   };
 }
 
-function createService(adapter: WorkflowAdapter) {
+function createService(adapter: WorkflowAdapter, now = () => new Date("2025-01-01T00:00:00.000Z")) {
   let nextId = 1;
   return new WebsiteWorkflowService(
     new Map([[adapter.cms, adapter]]),
-    () => new Date("2025-01-01T00:00:00.000Z"),
+    now,
     () => uuid(nextId++),
   );
 }
@@ -333,7 +333,132 @@ test("retries only failed tasks explicitly declared safe and read-only", async (
     retry_failed_read_only: true,
   });
   assert.equal(retried.status, "completed");
+  assert.equal(retried.executionMetrics.retryCount, 1);
   assert.equal(calls, 2);
+});
+
+test("cancellation interrupts an in-flight mutation and never replays it", async () => {
+  let startedResolve: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    startedResolve = resolve;
+  });
+  let releaseResolve: (() => void) | undefined;
+  const pending = new Promise<void>((resolve) => {
+    releaseResolve = resolve;
+  });
+  let calls = 0;
+  const { adapter } = createAdapter({
+    execute: async () => {
+      calls += 1;
+      startedResolve?.();
+      await pending;
+      return { changed: true };
+    },
+  });
+  const service = createService(adapter);
+  const plan = await service.planWorkflow(planInput([{
+    action: "add_text_section",
+    page_id: "home",
+    text: "Hello",
+    background_color: "#FFFFFF",
+    text_color: "#000000",
+    confirm_potentially_live_save: true,
+  }]));
+  service.approveTasks({
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: [plan.tasks[0]!.id],
+    confirmed: true,
+  });
+
+  const running = service.executeWorkflow({ workflow_id: plan.workflowId, max_tasks: 1 });
+  await started;
+  assert.equal(service.cancelWorkflow(plan.workflowId).cancellationRequested, true);
+  releaseResolve?.();
+  const result = await running;
+
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.tasks[0]?.status, "interrupted");
+  assert.equal(result.executionMetrics.status, "cancelled");
+  assert.equal(calls, 1);
+  const retry = await service.executeWorkflow({ workflow_id: plan.workflowId, max_tasks: 1 });
+  assert.equal(retry.status, "interrupted");
+  assert.equal(calls, 1);
+});
+
+test("deadline after a mutation starts marks it interrupted rather than retryable", async () => {
+  let clock = 0;
+  let calls = 0;
+  const { adapter } = createAdapter({
+    execute: async () => {
+      calls += 1;
+      clock = 2_000;
+      return { changed: true };
+    },
+  });
+  const service = createService(adapter, () => new Date(clock));
+  const plan = await service.planWorkflow(planInput([{
+    action: "add_text_section",
+    page_id: "home",
+    text: "Hello",
+    background_color: "#FFFFFF",
+    text_color: "#000000",
+    confirm_potentially_live_save: true,
+  }]));
+  service.approveTasks({
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: [plan.tasks[0]!.id],
+    confirmed: true,
+  });
+
+  const result = await service.executeWorkflow({
+    workflow_id: plan.workflowId,
+    max_tasks: 1,
+    timeout_ms: 1_000,
+  });
+  assert.equal(result.status, "timed_out");
+  assert.equal(result.tasks[0]?.status, "interrupted");
+  assert.equal(result.executionMetrics.status, "timed_out");
+  assert.equal(calls, 1);
+});
+
+test("browser-action budget is reported and an interrupted mutation is not retried", async () => {
+  let calls = 0;
+  const { adapter } = createAdapter({
+    execute: async (_action, _websiteId, _args, execution) => {
+      calls += 1;
+      execution?.browser.beforeBrowserAction();
+      execution?.browser.beforeBrowserAction();
+      return {};
+    },
+  });
+  const service = createService(adapter);
+  const plan = await service.planWorkflow(planInput([{
+    action: "add_text_section",
+    page_id: "home",
+    text: "Hello",
+    background_color: "#FFFFFF",
+    text_color: "#000000",
+    confirm_potentially_live_save: true,
+  }]));
+  service.approveTasks({
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: [plan.tasks[0]!.id],
+    confirmed: true,
+  });
+
+  const result = await service.executeWorkflow({
+    workflow_id: plan.workflowId,
+    max_tasks: 1,
+    max_browser_actions: 1,
+  });
+  assert.equal(result.status, "interrupted");
+  assert.equal(result.tasks[0]?.status, "interrupted");
+  assert.equal(result.executionMetrics.browserActionCount, 1);
+  await service.executeWorkflow({ workflow_id: plan.workflowId, max_tasks: 1 });
+  assert.equal(calls, 1);
 });
 
 test("QA reports responsive evidence only when returned by the registered inspector", async () => {
