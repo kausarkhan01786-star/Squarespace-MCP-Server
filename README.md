@@ -263,11 +263,36 @@ Kausar Mia site and Home page. All other section/block mutations remain
 unavailable.
 
 Squarespace Save has not been verified to preserve a draft on a published page.
-Consequently, `add_text_section` requires the caller to set
-`confirm_potentially_live_save` to `true` for every invocation. This is explicit
-approval that Save may make the requested content live. The tool never clicks
-Publish, and it refuses to begin if the site/page identity or fresh backup
-verification fails. Do not invoke it unless this approval is intended.
+Consequently, `add_text_section` requests a trusted interactive approval through
+MCP form elicitation before waiting for the shared-browser lock. The exact site,
+page, text, colors, bottom-section target, Save scope, and no-Publish behavior
+are shown in the proposal. `confirm_potentially_live_save` is retained only as a
+legacy acknowledgement and is not authorization. If the connected host does
+not advertise form elicitation, declines, cancels, or returns an invalid
+response, the mutation fails closed. The tool never clicks Publish, and it
+refuses to begin if site/page identity or fresh backup verification fails.
+Approval permits a potentially live Save; draft-only behavior remains
+unverified.
+
+Mutation approvals are server-issued, immutable, proposal-bound, single-use,
+and expire after two minutes. They remain internal to the server and cannot be
+supplied by tool callers. Save and Publish are separate permission scopes and
+cannot be granted by the same proposal. Directly callable page mutation
+services are guarded too; currently unsupported mutation paths have no
+registered approval proposal and therefore remain blocked.
+
+### VS Code host elicitation diagnostic
+
+The temporary `human-approval-diagnostic` stdio server is isolated from the
+Squarespace server and registers only `test_human_approval_prompt`. It does not
+construct a CMS provider, access the browser, or issue mutation approvals.
+Build with `npm run build`, then start or restart the **human-approval-diagnostic**
+server from VS Code's MCP server controls. Invoke `test_human_approval_prompt`
+from Chat. VS Code should show the exact harmless message and an **Accept /
+Decline** choice. The tool reports the host's response (`accept`, `decline`, or
+`cancel`); unsupported capability, timeout, or transport failure is reported
+without authorization. Remove the diagnostic server entry from `.vscode/mcp.json`
+and its dedicated source/test files after host verification is complete.
 
 Backups are stored under the project-local `backups/` directory, which is
 git-ignored:
@@ -400,10 +425,10 @@ Registered workflow tools:
   `page_id`. Unsupported actions are represented in the plan rather than
   called.
 - `approve_workflow_tasks` — requires `workflow_id`, the exact returned
-  `plan_fingerprint`, selected `task_ids`, and `confirmed: true`. This is the
-  explicit approval checkpoint for high-impact tasks. MCP hosts must obtain
-  that approval from the user; a boolean supplied by an unattended model is
-  not proof of human consent.
+  `plan_fingerprint`, selected `task_ids`, and the legacy `confirmed: true`
+  acknowledgement. It separately requests trusted interactive approval for
+  every selected mutation. A boolean supplied by an unattended model is never
+  proof of human consent; hosts without MCP form elicitation fail closed.
 - `execute_website_workflow` — requires a workflow ID; `max_tasks` is 1–10
   (default 1), `timeout_ms` is 1,000–600,000 (default 180,000), and
   `max_browser_actions` is 1–500 (default 100). Tasks execute in plan order,
@@ -483,16 +508,16 @@ The Squarespace adapter currently executes only verified operations:
 | `add_text_section` | `add_text_section` | Guarded, narrowly scoped mutation |
 
 `add_text_section` accepts `page_id`, `text`, `background_color: "#FFFFFF"`,
-`text_color: "#000000"`, and `confirm_potentially_live_save: true`. Its
-workflow task must be approved using the workflow ID and exact plan
-fingerprint; planning first checks that the target is the confirmed Kausar Mia
-website and its Home page. The task-specific flag and approval step are both
-required. Approval explicitly
-permits the existing tool's potentially-live Save, because draft-only Save
-behavior has not been confirmed. The content tool still creates and verifies
-a fresh snapshot/screenshots, checks site and Home-page identity, verifies the
-result, and never clicks Publish. Other page creation/editing, arbitrary block
-or design changes, navigation changes, custom code, commerce writes, order
+and `text_color: "#000000"`. Its workflow task must be approved through trusted
+interactive elicitation using the workflow ID and exact plan fingerprint;
+planning first checks that the target is the confirmed Kausar Mia website and
+its Home page. `confirm_potentially_live_save` is a legacy acknowledgement,
+not an authorization token. Approval explicitly permits the existing
+potentially-live Save because draft-only Save behavior has not been confirmed.
+The content tool still creates and verifies a fresh snapshot/screenshots,
+checks site and Home-page identity, verifies the result, and never clicks
+Publish. Other page creation/editing, arbitrary block or design changes,
+navigation changes, custom code, commerce writes, order
 changes, discounts, and publishing are unsupported and are not executed.
 
 The CMS-neutral batch-operation contract can represent section, text, button,

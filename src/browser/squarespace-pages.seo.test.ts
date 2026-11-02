@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium } from "playwright";
 import { SquarespacePagesService } from "./squarespace-pages.service.js";
+import { MutationApprovalGuard } from "../approval/mutation-approval.js";
 import type { WebsiteSummary } from "./squarespace-browser.service.js";
 
 test("reads observed page SEO, indexing, slug, and social-image controls without saving", async () => {
@@ -80,7 +81,7 @@ test("reads observed page SEO, indexing, slug, and social-image controls without
     async captureScreenshot() {
       throw new Error("This read-only settings test should not capture screenshots.");
     },
-  }, 1000);
+  }, new MutationApprovalGuard({ requestApproval: async () => true }), 1000);
 
   try {
     const [about] = await pages.listPages(website.id);

@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpServer as ProtocolMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
+import { MutationApprovalGuard } from "../approval/mutation-approval.js";
 import { registerWorkflowTools } from "./workflow-tools.js";
 import { WebsiteWorkflowService } from "../workflow/website-workflow.service.js";
 import type { WorkflowAdapter } from "../workflow/workflow-types.js";
@@ -33,7 +34,10 @@ test("registers the complete workflow MCP surface", () => {
       registered.push(name);
     },
   } as unknown as McpServer;
-  const workflow = new WebsiteWorkflowService(new Map());
+  const workflow = new WebsiteWorkflowService(
+    new Map(),
+    new MutationApprovalGuard({ requestApproval: async () => true }),
+  );
   registerWorkflowTools(server, workflow, new BrowserOperationLock());
 
   assert.deepEqual(registered, [
@@ -67,7 +71,10 @@ test("serves workflow discovery and requirement analysis over MCP protocol", asy
       return {};
     },
   };
-  const service = new WebsiteWorkflowService(new Map([[adapter.cms, adapter]]));
+  const service = new WebsiteWorkflowService(
+    new Map([[adapter.cms, adapter]]),
+    new MutationApprovalGuard({ requestApproval: async () => true }),
+  );
   const server = new ProtocolMcpServer({ name: "workflow-integration-test", version: "1.0.0" });
   const client = new Client({ name: "workflow-integration-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

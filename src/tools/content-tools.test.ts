@@ -8,7 +8,7 @@ import { addTextSectionInputSchema, SquarespaceContentService } from "../browser
 import type { SquarespacePage } from "../browser/squarespace-pages.service.js";
 import type { WebsiteSummary } from "../browser/squarespace-browser.service.js";
 import { registerContentTools } from "./content-tools.js";
-import { z } from "zod";
+import { MutationApprovalGuard } from "../approval/mutation-approval.js";
 
 const input = {
   website_id: "site-1",
@@ -39,6 +39,12 @@ const homePage: SquarespacePage = {
   visibilityStatus: "enabled",
   enabled: true,
 };
+
+function createApprovalGuard(approve = true): MutationApprovalGuard {
+  return new MutationApprovalGuard({
+    requestApproval: async () => approve,
+  });
+}
 
 test("validates the requested text and exact colors", () => {
   assert.deepEqual(addTextSectionInputSchema.parse(input), input);
@@ -81,6 +87,7 @@ test("validates the exact Home-page target without creating a backup or editing 
         throw new Error("Target validation must not verify a backup.");
       },
     },
+    createApprovalGuard(),
   );
 
   await service.verifyHomePageTarget(input.website_id, input.page_id);
@@ -92,7 +99,7 @@ test("validates the exact Home-page target without creating a backup or editing 
   assert.equal(pageReads, 2);
 });
 
-test("requires explicit potentially-live-save approval before any site or backup access", async () => {
+test("confirmed: true and legacy confirm_potentially_live_save cannot authorize a mutation", async () => {
   let browserCalls = 0;
   let pageCalls = 0;
   let backupCalls = 0;
@@ -132,15 +139,65 @@ test("requires explicit potentially-live-save approval before any site or backup
         throw new Error("Not expected.");
       },
     },
+    createApprovalGuard(),
   );
 
-  await assert.rejects(
-    () => service.addTextSection({ ...input, confirm_potentially_live_save: false }),
-    { code: "CONFIRMATION_REQUIRED" },
-  );
+  for (const suppliedConfirmation of [
+    { confirmed: true },
+    { confirm_potentially_live_save: true },
+  ]) {
+    await assert.rejects(
+      () => service.addTextSection({ ...input, ...suppliedConfirmation }),
+      { reason: "unavailable" },
+    );
+  }
   assert.equal(browserCalls, 0);
   assert.equal(pageCalls, 0);
   assert.equal(backupCalls, 0);
+});
+
+test("an approval for one exact text cannot authorize different content", async () => {
+  let pageReads = 0;
+  const service = new SquarespaceContentService(
+    {
+      getWebsite() {
+        return confirmedWebsite;
+      },
+      async openWebsiteUrl() {
+        throw new Error("A payload mismatch must block before navigation.");
+      },
+      async getCurrentPage() {
+        throw new Error("A payload mismatch must block before page access.");
+      },
+    },
+    {
+      async getPageDetails() {
+        pageReads += 1;
+        return homePage;
+      },
+      async inspectPageSections() {
+        throw new Error("A payload mismatch must block before section inspection.");
+      },
+      async savePageChanges() {
+        throw new Error("A payload mismatch must block before saving.");
+      },
+    },
+    {
+      async createPageSnapshot() {
+        throw new Error("A payload mismatch must block before backup creation.");
+      },
+      async verifyFreshSnapshot() {
+        throw new Error("A payload mismatch must block before backup verification.");
+      },
+    },
+    createApprovalGuard(),
+  );
+  const authorization = await service.requestTextSectionApproval(input);
+  await assert.rejects(
+    service.addTextSection({ ...input, text: "Different content" }, undefined, authorization),
+    { reason: "scope_mismatch" },
+  );
+  assert.equal(pageReads, 0);
 });
 
 test("rejects a different website before creating a backup or opening the editor", async () => {
@@ -179,18 +236,21 @@ test("rejects a different website before creating a backup or opening the editor
         throw new Error("Not expected.");
       },
     },
+    createApprovalGuard(),
   );
 
   await assert.rejects(
-    () => service.addTextSection(input),
+    () => service.requestTextSectionApproval(input),
     { code: "TEXT_SECTION_TARGET_MISMATCH" },
   );
   assert.equal(openCalls, 0);
   assert.equal(backupCalls, 0);
 });
 
-test("registers one guarded mutation tool and reports missing live-save approval", async () => {
+test("registers one guarded mutation tool and rejects without host approval", async () => {
   let browserCalls = 0;
+  let saveCalls = 0;
+  let backupCalls = 0;
   const service = new SquarespaceContentService(
     {
       getWebsite() {
@@ -214,17 +274,21 @@ test("registers one guarded mutation tool and reports missing live-save approval
         throw new Error("Not expected.");
       },
       async savePageChanges() {
-        throw new Error("Not expected.");
+        saveCalls += 1;
+        throw new Error("A declined approval must not reach Save.");
       },
     },
     {
       async createPageSnapshot() {
+        backupCalls += 1;
         throw new Error("Not expected.");
       },
       async verifyFreshSnapshot() {
+        backupCalls += 1;
         throw new Error("Not expected.");
       },
     },
+    createApprovalGuard(false),
   );
   const server = new McpServer({ name: "content-tools-test", version: "1.0.0" });
   const client = new Client({ name: "content-tools-client", version: "1.0.0" });
@@ -240,16 +304,16 @@ test("registers one guarded mutation tool and reports missing live-save approval
 
     const result = await client.callTool({
       name: "add_text_section",
-      arguments: { ...input, confirm_potentially_live_save: false },
+      arguments: {
+        ...input,
+        confirmed: true,
+        confirm_potentially_live_save: true,
+      },
     });
     assert.equal(result.isError, true);
-    assert.deepEqual(
-      z.object({
-        error: z.object({ code: z.string() }),
-      }).parse(JSON.parse(result.content[0]?.text ?? "{}")).error.code,
-      "CONFIRMATION_REQUIRED",
-    );
-    assert.equal(browserCalls, 0);
+    assert.equal(browserCalls, 1);
+    assert.equal(saveCalls, 0);
+    assert.equal(backupCalls, 0);
   } finally {
     await client.close();
     await server.close();

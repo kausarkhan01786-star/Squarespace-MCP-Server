@@ -12,6 +12,15 @@ import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
 import type { PageBackupService, PageSnapshot } from "../backups/page-backup.service.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
 import {
+  MutationApprovalError,
+  MutationApprovalGuard,
+  type MutationAuthorization,
+} from "../approval/mutation-approval.js";
+import {
+  textSectionMutationPayload,
+  textSectionMutationProposal,
+} from "../approval/squarespace-mutation-proposals.js";
+import {
   SQUARESPACE_PAGE_SECTION_SELECTOR,
   type SquarespacePage,
   type SquarespacePagesService,
@@ -33,7 +42,7 @@ export const addTextSectionInputSchema = z.object({
   background_color: z.literal("#FFFFFF"),
   text_color: z.literal("#000000"),
   confirm_potentially_live_save: z.boolean().default(false).describe(
-    "Required explicit approval because Squarespace Save has not been verified as draft-only.",
+    "Legacy acknowledgement only. A trusted interactive approval is still required; this value does not authorize a mutation.",
   ),
 });
 
@@ -57,6 +66,7 @@ export class SquarespaceContentService {
     private readonly browser: ContentBrowser,
     private readonly pages: ContentPages,
     private readonly backups: ContentBackups,
+    private readonly approval: MutationApprovalGuard,
     private readonly timeoutMs = 10_000,
   ) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
@@ -71,9 +81,27 @@ export class SquarespaceContentService {
     this.assertHomePage(homePage, website, pageId);
   }
 
+  async requestTextSectionApproval(rawInput: unknown): Promise<MutationAuthorization> {
+    const input = addTextSectionInputSchema.parse(rawInput);
+    const website = this.browser.getWebsite(input.website_id);
+    this.assertConfirmedWebsite(website);
+    return this.approval.requestApproval(
+      textSectionMutationProposal({
+        websiteId: input.website_id,
+        pageId: input.page_id,
+        text: input.text,
+      }),
+    );
+  }
+
+  revokeTextSectionApproval(authorization: MutationAuthorization): void {
+    this.approval.revoke(authorization.receipt);
+  }
+
   async addTextSection(
     rawInput: unknown,
     execution?: BrowserExecutionContext,
+    authorization?: MutationAuthorization,
   ): Promise<{
     websiteId: string;
     pageId: string;
@@ -87,14 +115,24 @@ export class SquarespaceContentService {
     verified: true;
     executionMetrics?: ExecutionMetrics;
   }> {
+    if (!authorization) {
+      throw new MutationApprovalError(
+        "unavailable",
+        "A trusted interactive approval is required before changing Squarespace content.",
+      );
+    }
     const ownedController = execution
       ? undefined
       : new ExecutionController({ timeoutMs: 180_000, maxBrowserActions: 100 });
     const context = execution ?? ownedController!;
     try {
-      const result = await withBrowserExecutionContext(
-        context,
-        () => this.runAddTextSection(rawInput, context),
+      const result = await this.approval.runAuthorized(
+        authorization.proposal,
+        authorization.receipt,
+        () => withBrowserExecutionContext(
+          context,
+          () => this.runAddTextSection(rawInput, context),
+        ),
       );
       if (!ownedController) return result;
       const executionMetrics = ownedController.finish("succeeded");
@@ -121,6 +159,8 @@ export class SquarespaceContentService {
         logInfo("content_execution_metrics", ownedController.finish(status));
       }
       throw stopped;
+    } finally {
+      this.approval.revoke(authorization.receipt);
     }
   }
 
@@ -140,13 +180,20 @@ export class SquarespaceContentService {
     verified: true;
   }> {
     const input = addTextSectionInputSchema.parse(rawInput);
-    if (!input.confirm_potentially_live_save) {
-      throw new SquarespaceBrowserError(
-        "CONFIRMATION_REQUIRED",
-        "Squarespace Save has not been verified as draft-only. Explicitly approve a potentially live save before any page-editor changes are made.",
-      );
-    }
-
+    const proposalInput = textSectionMutationProposal({
+      websiteId: input.website_id,
+      pageId: input.page_id,
+      text: input.text,
+    });
+    this.approval.assertAuthorized({
+      scope: "content.section.create",
+      provider: proposalInput.provider,
+      websiteId: input.website_id,
+      pageId: input.page_id,
+      action: proposalInput.action,
+      targetResource: proposalInput.targetResource,
+      payload: textSectionMutationPayload(input.text),
+    });
     const website = this.browser.getWebsite(input.website_id);
     this.assertConfirmedWebsite(website);
     execution?.startStage("website_verification");
@@ -281,11 +328,26 @@ export class SquarespaceContentService {
 
     execution?.startStage("save");
     execution?.checkpoint();
+    this.approval.assertAuthorized({
+      scope: "content.save",
+      provider: proposalInput.provider,
+      websiteId: input.website_id,
+      pageId: input.page_id,
+      action: proposalInput.action,
+      targetResource: proposalInput.targetResource,
+      payload: textSectionMutationPayload(input.text),
+    });
     const saveResult = await this.pages.savePageChanges(
       input.website_id,
       false,
       undefined,
       execution,
+      {
+        pageId: input.page_id,
+        action: proposalInput.action,
+        targetResource: proposalInput.targetResource,
+        payload: textSectionMutationPayload(input.text),
+      },
     );
     execution?.checkpoint();
     execution?.endStage("save");

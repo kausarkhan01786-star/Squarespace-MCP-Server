@@ -5,11 +5,32 @@ import {
   SquarespacePagesService,
 } from "./squarespace-pages.service.js";
 import type { WebsiteSummary } from "./squarespace-browser.service.js";
+import {
+  MutationApprovalGuard,
+  type MutationProposalInput,
+} from "../approval/mutation-approval.js";
 
 const website: WebsiteSummary = {
   id: "fixture-site",
   name: "Fixture Website",
   url: "https://fixture.squarespace.com/config",
+};
+
+class FixtureMutationApprovalGuard extends MutationApprovalGuard {
+  constructor() {
+    super({ requestApproval: async () => true });
+  }
+
+  override assertAuthorized(
+    _input: Parameters<MutationApprovalGuard["assertAuthorized"]>[0],
+  ): void {}
+}
+
+const fixtureSaveAuthorization = {
+  pageId: "fixture-page",
+  action: "fixture.save",
+  targetResource: "page:fixture-page",
+  payload: {},
 };
 
 const pageRecords = new Map([
@@ -768,7 +789,13 @@ test("inspects mobile overflow at a narrow viewport and restores the original vi
 test("saves current editor changes and verifies Squarespace confirmation", async () => {
   const { browser, pages, screenshots } = await createEditorFixture(true);
   try {
-    const result = await pages.savePageChanges(website.id);
+    const result = await pages.savePageChanges(
+      website.id,
+      false,
+      undefined,
+      undefined,
+      fixtureSaveAuthorization,
+    );
     assert.equal(result.success, true);
     assert.equal(result.saved, true);
     assert.equal(result.published, false);
@@ -786,11 +813,23 @@ test("publishes only with explicit confirmation and verifies Squarespace confirm
   const { browser, pages, screenshots } = await createEditorFixture(true, true);
   try {
     await assert.rejects(
-      () => pages.savePageChanges(website.id, true),
+      () => pages.savePageChanges(
+        website.id,
+        true,
+        undefined,
+        undefined,
+        fixtureSaveAuthorization,
+      ),
       { code: "CONFIRMATION_REQUIRED" },
     );
 
-    const result = await pages.savePageChanges(website.id, true, "PUBLISH");
+    const result = await pages.savePageChanges(
+      website.id,
+      true,
+      "PUBLISH",
+      undefined,
+      fixtureSaveAuthorization,
+    );
     assert.equal(result.success, true);
     assert.equal(result.saved, true);
     assert.equal(result.published, true);
@@ -806,13 +845,124 @@ test("does not report editor save success without Squarespace confirmation", asy
   const { browser, pages, screenshots } = await createEditorFixture(false);
   try {
     await assert.rejects(
-      () => pages.savePageChanges(website.id),
+      () => pages.savePageChanges(
+        website.id,
+        false,
+        undefined,
+        undefined,
+        fixtureSaveAuthorization,
+      ),
       { code: "PAGE_SAVE_FAILED" },
     );
     assert.equal(screenshots.length, 2);
   } finally {
     await browser.close();
   }
+});
+
+test("direct page mutation entry points require authorization and Save approval cannot authorize Publish", async () => {
+  let browserCalls = 0;
+  const approval = new MutationApprovalGuard({
+    requestApproval: async () => true,
+  });
+  const pages = new SquarespacePagesService({
+    async listWebsites() {
+      browserCalls += 1;
+      return [website];
+    },
+    getWebsite() {
+      browserCalls += 1;
+      return website;
+    },
+    async openWebsitePages() {
+      browserCalls += 1;
+    },
+    async openWebsiteUrl() {
+      browserCalls += 1;
+    },
+    async getCurrentPage() {
+      browserCalls += 1;
+      throw new Error("Unapproved mutations must not access the current page.");
+    },
+    async captureScreenshot() {
+      browserCalls += 1;
+      return "unexpected.png";
+    },
+  }, approval);
+
+  await assert.rejects(
+    pages.createPage(website.id, "New page", "page", "main_navigation"),
+    { reason: "unavailable" },
+  );
+  await assert.rejects(
+    pages.duplicatePage(website.id, "page-1"),
+    { reason: "unavailable" },
+  );
+  await assert.rejects(
+    pages.movePage(website.id, "page-1", "main_navigation"),
+    { reason: "unavailable" },
+  );
+  await assert.rejects(
+    pages.deletePage(website.id, "page-1", "DELETE"),
+    { reason: "unavailable" },
+  );
+  await assert.rejects(
+    pages.updatePageTitle(website.id, "home-1", "Unapproved title"),
+    { reason: "unavailable" },
+  );
+  await assert.rejects(
+    pages.updatePageUrl(website.id, "home-1", "unapproved-url"),
+    { reason: "unavailable" },
+  );
+  await assert.rejects(
+    pages.savePageChanges(
+      website.id,
+      false,
+      undefined,
+      undefined,
+      fixtureSaveAuthorization,
+    ),
+    { reason: "unavailable" },
+  );
+  assert.equal(browserCalls, 0);
+
+  const textProposal = {
+    provider: "squarespace",
+    websiteId: website.id,
+    pageId: "home-1",
+    action: "content.add_text_section",
+    targetResource: "page:home-1:bottom-section",
+    payload: {
+      sectionPosition: "bottom",
+      block: { type: "Text", text: "Approved text" },
+      sectionBackground: "#FFFFFF",
+      textColor: "#000000",
+      save: true,
+      publish: false,
+    },
+    permissionScopes: ["content.section.create", "content.save"],
+  } satisfies MutationProposalInput;
+  const authorization = await approval.requestApproval(textProposal);
+  await assert.rejects(
+    approval.runAuthorized(
+      authorization.proposal,
+      authorization.receipt,
+      () => pages.savePageChanges(
+        website.id,
+        true,
+        "PUBLISH",
+        undefined,
+        {
+          pageId: "home-1",
+          action: "content.add_text_section",
+          targetResource: "page:home-1:bottom-section",
+          payload: textProposal.payload,
+        },
+      ),
+    ),
+    { reason: "scope_mismatch" },
+  );
+  assert.equal(browserCalls, 0);
 });
 
 async function createFixture(): Promise<{
@@ -855,7 +1005,7 @@ async function createFixture(): Promise<{
     async captureScreenshot(fileName) {
       return fileName ?? "fixture-screenshot.png";
     },
-  });
+  }, new FixtureMutationApprovalGuard());
   return { browser, page, pages };
 }
 
@@ -905,6 +1055,7 @@ async function createPageFixture(
         return fileName ?? "unnamed.png";
       },
     },
+    new FixtureMutationApprovalGuard(),
     2_000,
   );
   return { browser, page, pages, screenshots };
@@ -948,6 +1099,7 @@ async function createMoveFixture(): Promise<{
         return fileName ?? "unnamed.png";
       },
     },
+    new FixtureMutationApprovalGuard(),
     2_000,
   );
   return { browser, pages, screenshots };
@@ -990,6 +1142,7 @@ async function createEditorFixture(
         return fileName ?? "unnamed.png";
       },
     },
+    new FixtureMutationApprovalGuard(),
     2_000,
   );
   return { browser, pages, screenshots };

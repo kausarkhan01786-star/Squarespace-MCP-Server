@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
 import type { BrowserExecutionContext } from "../browser/browser-execution-context.js";
+import type { MutationAuthorization } from "../approval/mutation-approval.js";
 
 const textListSchema = z.array(z.string().trim().min(1).max(500)).max(50);
 
@@ -90,7 +91,9 @@ export const planWebsiteWorkflowInputSchema = z.object({
     text: z.string().min(1).max(500).optional(),
     background_color: z.string().optional(),
     text_color: z.string().optional(),
-    confirm_potentially_live_save: z.boolean().optional(),
+    confirm_potentially_live_save: z.boolean().optional().describe(
+      "Legacy acknowledgement only. Trusted interactive human approval is requested separately and is required to authorize the mutation.",
+    ),
   }).strict().superRefine((task, context) => {
     const needsPage = new Set<WorkflowAction>([
       "inspect_page",
@@ -137,13 +140,6 @@ export const planWebsiteWorkflowInputSchema = z.object({
           message: "The verified add_text_section workflow supports only #000000.",
         });
       }
-      if (task.confirm_potentially_live_save !== true) {
-        context.addIssue({
-          code: "custom",
-          path: ["confirm_potentially_live_save"],
-          message: "add_text_section requires explicit confirmation that Squarespace Save may affect the live site.",
-        });
-      }
     }
   })).min(1).max(100),
 }).strict();
@@ -160,7 +156,9 @@ export const approveWorkflowTasksInputSchema = z.object({
   workflow_id: z.string().uuid(),
   plan_fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   task_ids: z.array(z.string().uuid()).min(1).max(20),
-  confirmed: z.literal(true),
+  confirmed: z.literal(true).describe(
+    "Acknowledgement only. Trusted interactive human approval is requested separately and is required to authorize mutations.",
+  ),
 }).strict();
 
 export const workflowIdInputSchema = z.object({
@@ -243,6 +241,7 @@ export interface WorkflowExecutionContext {
   deadlineAt: number;
   workflowId: string;
   taskId: string | undefined;
+  mutationAuthorization?: MutationAuthorization;
 }
 
 export interface WorkflowTask {
@@ -258,6 +257,7 @@ export interface WorkflowTask {
   retrySafe: boolean;
   attempts: number;
   args: PlannedTaskInput;
+  mutationAuthorization?: MutationAuthorization;
   result?: unknown;
   error?: string;
 }

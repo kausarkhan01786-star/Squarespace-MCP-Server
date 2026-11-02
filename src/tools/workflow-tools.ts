@@ -51,7 +51,7 @@ export function registerWorkflowTools(
   server.registerTool(
     "approve_workflow_tasks",
     {
-      description: "Explicitly authorize selected high-impact tasks in an immutable workflow plan. Requires confirmed=true and the exact plan fingerprint.",
+      description: "Request trusted interactive human approval for each selected mutation in the immutable workflow plan. confirmed=true and the plan fingerprint are not authorization; mutations are blocked unless the connected host supports approval elicitation.",
       inputSchema: approveWorkflowTasksInputSchema,
       outputSchema,
       annotations: {

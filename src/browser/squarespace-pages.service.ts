@@ -10,6 +10,11 @@ import {
   type BrowserExecutionContext,
 } from "./browser-execution-context.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
+import {
+  MutationApprovalError,
+  MutationApprovalGuard,
+  type MutationPermissionScope,
+} from "../approval/mutation-approval.js";
 import { assertAllowedSquarespaceUrl } from "./browser-security.js";
 import type { SquarespaceBrowserService, WebsiteSummary } from "./squarespace-browser.service.js";
 
@@ -144,6 +149,13 @@ interface PageTextSettingUpdateOptions {
   validateTarget?: (target: SquarespacePage, website: WebsiteSummary) => void;
 }
 
+export interface PageSaveAuthorizationExpectation {
+  pageId: string;
+  action: string;
+  targetResource: string;
+  payload: Record<string, unknown>;
+}
+
 interface SquarespacePagesBrowser {
   listWebsites(): Promise<WebsiteSummary[]>;
   getWebsite(websiteId: string): WebsiteSummary;
@@ -156,6 +168,7 @@ interface SquarespacePagesBrowser {
 export class SquarespacePagesService {
   constructor(
     private readonly browser: SquarespacePagesBrowser,
+    private readonly approval: MutationApprovalGuard,
     private readonly timeoutMs = 30_000,
   ) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
@@ -165,6 +178,25 @@ export class SquarespacePagesService {
 
   async listWebsites(): Promise<WebsiteSummary[]> {
     return this.browser.listWebsites();
+  }
+
+  private assertMutationAuthorized(input: {
+    scope: MutationPermissionScope;
+    websiteId: string;
+    pageId?: string;
+    action: string;
+    targetResource: string;
+    payload: Record<string, unknown>;
+  }): void {
+    this.approval.assertAuthorized({
+      scope: input.scope,
+      provider: "squarespace",
+      websiteId: input.websiteId,
+      ...(input.pageId === undefined ? {} : { pageId: input.pageId }),
+      action: input.action,
+      targetResource: input.targetResource,
+      payload: input.payload,
+    });
   }
 
   async createPage(
@@ -186,6 +218,13 @@ export class SquarespacePagesService {
         "Page titles must contain between 1 and 100 characters.",
       );
     }
+    this.assertMutationAuthorized({
+      scope: "page.create",
+      websiteId,
+      action: "page.create",
+      targetResource: `website:${websiteId}:page-list:${group}`,
+      payload: { title: normalizedTitle, pageType, group },
+    });
 
     const website = this.browser.getWebsite(websiteId);
     await this.browser.openWebsitePages(websiteId);
@@ -328,6 +367,14 @@ export class SquarespacePagesService {
     page: SquarespacePage;
     screenshots: { before: string; after: string };
   }> {
+    this.assertMutationAuthorized({
+      scope: "page.create",
+      websiteId,
+      pageId,
+      action: "page.duplicate",
+      targetResource: `page:${pageId}`,
+      payload: { pageId },
+    });
     const website = this.browser.getWebsite(websiteId);
     const initialPages = await this.readWebsitePages(websiteId);
     const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
@@ -344,7 +391,6 @@ export class SquarespacePagesService {
         "Folder duplication is not supported; select a Squarespace page instead.",
       );
     }
-
     const page = await this.browser.getCurrentPage();
     await this.waitForPagesPanel(page);
     const screenshotId = randomUUID();
@@ -455,6 +501,18 @@ export class SquarespacePagesService {
     page: SquarespacePage;
     screenshots: { before: string; after: string };
   }> {
+    this.assertMutationAuthorized({
+      scope: "navigation.update",
+      websiteId,
+      pageId,
+      action: "page.move",
+      targetResource: `page:${pageId}`,
+      payload: {
+        pageId,
+        destinationGroup,
+        destinationFolderId: destinationFolderId ?? null,
+      },
+    });
     const website = this.browser.getWebsite(websiteId);
     const initialPages = await this.readWebsitePages(websiteId);
     const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
@@ -509,7 +567,6 @@ export class SquarespacePagesService {
         "The page is already in that location. Reordering within the same location is not supported.",
       );
     }
-
     const page = await this.browser.getCurrentPage();
     await this.waitForPagesPanel(page);
     const screenshotId = randomUUID();
@@ -665,6 +722,14 @@ export class SquarespacePagesService {
       );
     }
 
+    this.assertMutationAuthorized({
+      scope: "page.delete",
+      websiteId,
+      pageId,
+      action: "page.delete",
+      targetResource: `page:${pageId}`,
+      payload: { pageId },
+    });
     const website = this.browser.getWebsite(websiteId);
     const initialPages = await this.readWebsitePages(websiteId);
     const targetIndex = initialPages.findIndex((candidate) => candidate.id === pageId);
@@ -687,7 +752,6 @@ export class SquarespacePagesService {
         "The Squarespace homepage cannot be deleted while it is assigned as the homepage.",
       );
     }
-
     const page = await this.browser.getCurrentPage();
     await this.waitForPagesPanel(page);
     const screenshotId = randomUUID();
@@ -809,6 +873,7 @@ export class SquarespacePagesService {
     publish = false,
     confirmation?: "PUBLISH",
     execution?: BrowserExecutionContext,
+    authorization?: PageSaveAuthorizationExpectation,
   ): Promise<{
     success: true;
     saved: true;
@@ -817,6 +882,20 @@ export class SquarespacePagesService {
     screenshots: { before: string; after: string };
     inspection: { before: EditorInspection; after: EditorInspection };
   }> {
+    if (!authorization) {
+      throw new MutationApprovalError(
+        "unavailable",
+        "A proposal-specific approval is required at the page save boundary.",
+      );
+    }
+    this.assertMutationAuthorized({
+      scope: publish ? "content.publish" : "content.save",
+      websiteId,
+      pageId: authorization.pageId,
+      action: authorization.action,
+      targetResource: authorization.targetResource,
+      payload: authorization.payload,
+    });
     const website = this.browser.getWebsite(websiteId);
     const page = await this.browser.getCurrentPage();
     this.assertCurrentPageBelongsToWebsite(page, website);
@@ -965,6 +1044,14 @@ export class SquarespacePagesService {
         "Page titles must contain between 1 and 100 characters.",
       );
     }
+    this.assertMutationAuthorized({
+      scope: "page.update",
+      websiteId,
+      pageId,
+      action: "page.update_title",
+      targetResource: `page:${pageId}:settings`,
+      payload: { pageId, field: "Page Title", value: normalizedTitle },
+    });
 
     return this.updatePageTextSetting({
       websiteId,
@@ -1005,6 +1092,14 @@ export class SquarespacePagesService {
       );
     }
     const normalizedSlug = trimmedSlug.toLowerCase();
+    this.assertMutationAuthorized({
+      scope: "page.update",
+      websiteId,
+      pageId,
+      action: "page.update_url",
+      targetResource: `page:${pageId}:settings`,
+      payload: { pageId, field: "URL Slug", value: normalizedSlug },
+    });
 
     return this.updatePageTextSetting({
       websiteId,

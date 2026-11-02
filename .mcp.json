@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "human-approval-diagnostic": {
+      "command": "node",
+      "args": ["dist/approval-diagnostic-server.js"]
+    }
+  }
+}

@@ -3,6 +3,10 @@ import test from "node:test";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
 import { ExecutionStoppedError } from "../execution/execution-controller.js";
 import {
+  MutationApprovalGuard,
+  type MutationProposal,
+} from "../approval/mutation-approval.js";
+import {
   type WorkflowAction,
   type WorkflowAdapter,
   type WorkflowCapability,
@@ -83,10 +87,15 @@ function capability(
   };
 }
 
-function createService(adapter: WorkflowAdapter, now = () => new Date("2025-01-01T00:00:00.000Z")) {
+function createService(
+  adapter: WorkflowAdapter,
+  now = () => new Date("2025-01-01T00:00:00.000Z"),
+  requestApproval: (proposal: MutationProposal) => Promise<boolean> = async () => true,
+) {
   let nextId = 1;
   return new WebsiteWorkflowService(
     new Map([[adapter.cms, adapter]]),
+    new MutationApprovalGuard({ requestApproval }),
     now,
     () => uuid(nextId++),
   );
@@ -192,8 +201,8 @@ test("requires immutable-plan approval before executing live content changes", a
   assert.equal(blocked.status, "awaiting_approval");
   assert.deepEqual(calls, []);
 
-  assert.throws(
-    () => service.approveTasks({
+  await assert.rejects(
+    service.approveTasks({
       workflow_id: plan.workflowId,
       plan_fingerprint: "0".repeat(64),
       task_ids: [taskId],
@@ -203,7 +212,7 @@ test("requires immutable-plan approval before executing live content changes", a
       error instanceof SquarespaceBrowserError &&
       error.code === "WORKFLOW_PLAN_MISMATCH",
   );
-  service.approveTasks({
+  await service.approveTasks({
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [taskId],
@@ -219,6 +228,83 @@ test("requires immutable-plan approval before executing live content changes", a
   assert.deepEqual(executed.executedTasks[0]!.result, { success: true });
   assert.equal(calls[0]!.action, "add_text_section");
   assert.equal(service.getQaReport(plan.workflowId).status, "partial");
+});
+
+test("workflow approval requires host acceptance of the exact proposal, not confirmed=true", async () => {
+  let promptProposal: MutationProposal | undefined;
+  const { adapter } = createAdapter();
+  const service = createService(
+    adapter,
+    () => new Date("2025-01-01T00:00:00.000Z"),
+    async (proposal) => {
+      promptProposal = proposal;
+      return false;
+    },
+  );
+  const plan = await service.planWorkflow(planInput([{
+    action: "add_text_section",
+    page_id: "home",
+    text: "Kausar Mia",
+    background_color: "#FFFFFF",
+    text_color: "#000000",
+    confirm_potentially_live_save: true,
+  }]));
+  await assert.rejects(service.approveTasks({
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: [plan.tasks[0]!.id],
+    confirmed: true,
+  }), { reason: "rejected" });
+  assert.equal(promptProposal?.websiteId, website.id);
+  assert.equal(promptProposal?.pageId, "home");
+  assert.equal(promptProposal?.payload.publish, false);
+  assert.equal(service.getWorkflowStatus(plan.workflowId).tasks[0]?.approved, false);
+  assert.equal(service.getWorkflowStatus(plan.workflowId).tasks[0]?.status, "pending");
+});
+
+test("prevents overlapping approval prompts and workflow execution", async () => {
+  let promptStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    promptStarted = resolve;
+  });
+  let acceptPrompt: ((accepted: boolean) => void) | undefined;
+  const promptResult = new Promise<boolean>((resolve) => {
+    acceptPrompt = resolve;
+  });
+  const { adapter } = createAdapter();
+  const service = createService(
+    adapter,
+    () => new Date("2025-01-01T00:00:00.000Z"),
+    async () => {
+      promptStarted?.();
+      return promptResult;
+    },
+  );
+  const plan = await service.planWorkflow(planInput([{
+    action: "add_text_section",
+    page_id: "home",
+    text: "Kausar Mia",
+    background_color: "#FFFFFF",
+    text_color: "#000000",
+    confirm_potentially_live_save: true,
+  }]));
+  const approvalInput = {
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: [plan.tasks[0]!.id],
+    confirmed: true as const,
+  };
+  const approving = service.approveTasks(approvalInput);
+  await started;
+  await assert.rejects(service.approveTasks(approvalInput), {
+    code: "WORKFLOW_ALREADY_RUNNING",
+  });
+  await assert.rejects(service.executeWorkflow({
+    workflow_id: plan.workflowId,
+    max_tasks: 1,
+  }), { code: "WORKFLOW_ALREADY_RUNNING" });
+  acceptPrompt?.(true);
+  await approving;
 });
 
 test("rejects a mixed valid/invalid approval request without granting partial approval", async () => {
@@ -242,8 +328,8 @@ test("rejects a mixed valid/invalid approval request without granting partial ap
       confirm_potentially_live_save: true,
     },
   ]));
-  assert.throws(
-    () => service.approveTasks({
+  await assert.rejects(
+    service.approveTasks({
       workflow_id: plan.workflowId,
       plan_fingerprint: plan.fingerprint,
       task_ids: [plan.tasks[0]!.id, uuid(999)],
@@ -284,7 +370,7 @@ test("serializes execution and does not retry failed mutation tasks", async () =
     text_color: "#000000",
     confirm_potentially_live_save: true,
   }]));
-  service.approveTasks({
+  await service.approveTasks({
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
@@ -366,7 +452,7 @@ test("cancellation interrupts an in-flight mutation and never replays it", async
     text_color: "#000000",
     confirm_potentially_live_save: true,
   }]));
-  service.approveTasks({
+  await service.approveTasks({
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
@@ -480,7 +566,7 @@ test("deadline after a mutation starts marks it interrupted rather than retryabl
     text_color: "#000000",
     confirm_potentially_live_save: true,
   }]));
-  service.approveTasks({
+  await service.approveTasks({
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
@@ -517,7 +603,7 @@ test("browser-action budget is reported and an interrupted mutation is not retri
     text_color: "#000000",
     confirm_potentially_live_save: true,
   }]));
-  service.approveTasks({
+  await service.approveTasks({
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],

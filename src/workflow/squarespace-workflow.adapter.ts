@@ -306,14 +306,10 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
           execution?.browser,
         );
       case "add_text_section":
-        if (!args.text || args.confirm_potentially_live_save !== true) {
+        if (!args.text) {
           throw new SquarespaceBrowserError(
-            args.confirm_potentially_live_save !== true
-              ? "CONFIRMATION_REQUIRED"
-              : "WORKFLOW_EXECUTION_FAILED",
-            args.confirm_potentially_live_save !== true
-              ? "The workflow task must explicitly authorize a potentially live Squarespace Save."
-              : "The add_text_section task requires text.",
+            "WORKFLOW_EXECUTION_FAILED",
+            "The add_text_section task requires text.",
           );
         }
         return this.services.content.addTextSection({
@@ -323,7 +319,7 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
           background_color: "#FFFFFF",
           text_color: "#000000",
           confirm_potentially_live_save: args.confirm_potentially_live_save,
-        }, execution?.browser);
+        }, execution?.browser, execution?.mutationAuthorization);
       default:
         throw new SquarespaceBrowserError(
           "WORKFLOW_CMS_UNAVAILABLE",

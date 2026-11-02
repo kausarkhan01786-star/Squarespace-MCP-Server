@@ -8,6 +8,13 @@ import {
 import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
 import { logError, logInfo } from "../utils/logger.js";
 import {
+  MutationApprovalError,
+  MutationApprovalGuard,
+  type MutationAuthorization,
+  type MutationProposalInput,
+} from "../approval/mutation-approval.js";
+import { textSectionMutationProposal } from "../approval/squarespace-mutation-proposals.js";
+import {
   analyzeRequirementsInputSchema,
   approveWorkflowTasksInputSchema,
   executeWorkflowInputSchema,
@@ -29,10 +36,12 @@ type WorkflowAdapterRegistry = ReadonlyMap<string, WorkflowAdapter>;
 export class WebsiteWorkflowService {
   private readonly workflows = new Map<string, WebsiteWorkflow>();
   private readonly runningWorkflows = new Set<string>();
+  private readonly approvingWorkflows = new Set<string>();
   private readonly cancellationControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly adapters: WorkflowAdapterRegistry,
+    private readonly mutationApproval: MutationApprovalGuard,
     private readonly now: () => Date = () => new Date(),
     private readonly createId: () => string = randomUUID,
   ) {}
@@ -200,18 +209,21 @@ export class WebsiteWorkflowService {
     };
   }
 
-  approveTasks(rawInput: unknown): {
+  async approveTasks(rawInput: unknown): Promise<{
     workflowId: string;
     fingerprint: string;
     approvedTaskIds: string[];
     remainingApprovals: string[];
-  } {
+  }> {
     const input = approveWorkflowTasksInputSchema.parse(rawInput);
     const workflow = this.requireWorkflow(input.workflow_id);
-    if (this.runningWorkflows.has(workflow.id)) {
+    if (
+      this.runningWorkflows.has(workflow.id) ||
+      this.approvingWorkflows.has(workflow.id)
+    ) {
       throw new SquarespaceBrowserError(
         "WORKFLOW_ALREADY_RUNNING",
-        "Workflow approvals cannot change while tasks are executing.",
+        "Workflow approval requests cannot overlap each other or workflow execution.",
       );
     }
     if (workflow.fingerprint !== input.plan_fingerprint) {
@@ -241,8 +253,35 @@ export class WebsiteWorkflowService {
         "One or more selected task IDs are not approvable high-impact operations.",
       );
     }
+    this.approvingWorkflows.add(workflow.id);
+    const authorizations: Array<{
+      task: WorkflowTask;
+      authorization: MutationAuthorization;
+    }> = [];
+    try {
+      for (const task of selectedTasks) {
+        authorizations.push({
+          task,
+          authorization: await this.mutationApproval.requestApproval(
+            this.proposalForTask(workflow, task),
+          ),
+        });
+      }
+    } catch (error) {
+      for (const { authorization } of authorizations) {
+        this.mutationApproval.revoke(authorization.receipt);
+      }
+      throw error;
+    } finally {
+      this.approvingWorkflows.delete(workflow.id);
+    }
+
     const approved: string[] = [];
-    for (const task of selectedTasks) {
+    for (const { task, authorization } of authorizations) {
+      if (task.mutationAuthorization) {
+        this.mutationApproval.revoke(task.mutationAuthorization.receipt);
+      }
+      task.mutationAuthorization = authorization;
       task.approved = true;
       if (task.status === "blocked") task.status = "pending";
       approved.push(task.id);
@@ -257,6 +296,31 @@ export class WebsiteWorkflowService {
         .filter((task) => task.approvalRequired && !task.approved && task.status !== "unsupported")
         .map((task) => task.id),
     };
+  }
+
+  private proposalForTask(
+    workflow: WebsiteWorkflow,
+    task: WorkflowTask,
+  ): MutationProposalInput {
+    if (task.action === "add_text_section") {
+      const pageId = task.args.page_id;
+      const text = task.args.text;
+      if (!pageId || !text?.trim()) {
+        throw new MutationApprovalError(
+          "invalid",
+          "The workflow task is missing the exact page or text required for approval.",
+        );
+      }
+      return textSectionMutationProposal({
+        websiteId: workflow.website.id,
+        pageId,
+        text,
+      });
+    }
+    throw new MutationApprovalError(
+      "unavailable",
+      `No exact approval proposal is implemented for workflow action "${task.action}".`,
+    );
   }
 
   async executeWorkflow(rawInput: unknown): Promise<{
@@ -274,6 +338,12 @@ export class WebsiteWorkflowService {
   }> {
     const input = executeWorkflowInputSchema.parse(rawInput);
     const workflow = this.requireWorkflow(input.workflow_id);
+    if (this.approvingWorkflows.has(workflow.id)) {
+      throw new SquarespaceBrowserError(
+        "WORKFLOW_ALREADY_RUNNING",
+        "Wait for the pending human approval request to finish before executing this workflow.",
+      );
+    }
     if (this.runningWorkflows.has(workflow.id)) {
       throw new SquarespaceBrowserError(
         "WORKFLOW_ALREADY_RUNNING",
@@ -355,9 +425,12 @@ export class WebsiteWorkflowService {
           task.status === "failed" ||
           task.status === "running"
         ) break;
-        if (task.approvalRequired && !task.approved) {
+        if (
+          task.approvalRequired &&
+          (!task.approved || !task.mutationAuthorization)
+        ) {
           task.status = "blocked";
-          task.error = "Explicit approval for this exact task is required before execution.";
+          task.error = "Trusted human approval for this exact task is required before execution.";
           break;
         }
         if (retryTaskIds.delete(task.id)) controller.recordRetry();
@@ -381,6 +454,9 @@ export class WebsiteWorkflowService {
                 deadlineAt: controller.deadlineAt,
                 workflowId: workflow.id,
                 taskId: task.id,
+                ...(task.mutationAuthorization
+                  ? { mutationAuthorization: task.mutationAuthorization }
+                  : {}),
               },
             ),
             controller,
@@ -421,6 +497,7 @@ export class WebsiteWorkflowService {
           break;
         } finally {
           controller.endStage("workflow_task");
+          this.releaseTaskAuthorization(task);
         }
       }
     } catch (error) {
@@ -434,6 +511,7 @@ export class WebsiteWorkflowService {
       }
     } finally {
       controller.endStage("website_verification");
+      for (const task of workflow.tasks) this.releaseTaskAuthorization(task);
       this.runningWorkflows.delete(workflow.id);
       this.cancellationControllers.delete(workflow.id);
       workflow.updatedAt = this.now().toISOString();
@@ -443,6 +521,7 @@ export class WebsiteWorkflowService {
       ) {
         workflow.status = deriveStatus(workflow.tasks, executionStatus === "failed");
       }
+
       workflow.executionMetrics = controller.finish(executionStatus);
       logInfo("workflow_execution_metrics", {
         ...workflow.executionMetrics,
@@ -457,6 +536,14 @@ export class WebsiteWorkflowService {
       executionMetrics: workflow.executionMetrics ?? controller.finish(executionStatus),
       tasks: this.getWorkflowStatus(workflow.id).tasks,
     };
+  }
+
+  private releaseTaskAuthorization(task: WorkflowTask): void {
+    if (task.mutationAuthorization) {
+      this.mutationApproval.revoke(task.mutationAuthorization.receipt);
+      delete task.mutationAuthorization;
+    }
+    task.approved = false;
   }
 
   cancelWorkflow(workflowId: string): {

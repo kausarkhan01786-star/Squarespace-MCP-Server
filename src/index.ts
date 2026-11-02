@@ -20,17 +20,26 @@ import { registerHeroTools } from "./tools/hero-tools.js";
 import { SquarespaceWorkflowAdapter } from "./workflow/squarespace-workflow.adapter.js";
 import { WebsiteWorkflowService } from "./workflow/website-workflow.service.js";
 import { logError } from "./utils/logger.js";
+import { MutationApprovalGuard } from "./approval/mutation-approval.js";
+import { McpHumanApprovalPrompt } from "./approval/mcp-human-approval.js";
 
 async function main(): Promise<void> {
+  const server = new McpServer({
+    name: "squarespace-mcp-server",
+    version: "0.1.0",
+  });
+  const mutationApproval = new MutationApprovalGuard(
+    new McpHumanApprovalPrompt(server.server),
+  );
   const browserOperationLock = new BrowserOperationLock();
   const browser = new SquarespaceBrowserService();
-  const pages = new SquarespacePagesService(browser);
+  const pages = new SquarespacePagesService(browser, mutationApproval);
   const browserProvider = new PlaywrightBrowserProvider(browser, pages);
   const design = new SquarespaceDesignService(browser, pages);
   const navigationSeoSettings =
     new SquarespaceNavigationSeoSettingsService(browser, pages);
   const backups = new PageBackupService(pages, browser);
-  const content = new SquarespaceContentService(browser, pages, backups);
+  const content = new SquarespaceContentService(browser, pages, backups, mutationApproval);
   const commerceProvider = new SquarespaceCommerceProvider({
     ...(process.env.SQUARESPACE_API_KEY
       ? { apiKey: process.env.SQUARESPACE_API_KEY }
@@ -50,11 +59,7 @@ async function main(): Promise<void> {
       content,
       commerce,
     }, browserOperationLock)],
-  ]));
-  const server = new McpServer({
-    name: "squarespace-mcp-server",
-    version: "0.1.0",
-  });
+  ]), mutationApproval);
   const transport = new StdioServerTransport();
 
   registerPagesTools(server, pages, backups, browserOperationLock);

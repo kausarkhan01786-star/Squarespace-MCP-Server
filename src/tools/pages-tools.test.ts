@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PageBackupService } from "../backups/page-backup.service.js";
 import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { SquarespacePagesService } from "../browser/squarespace-pages.service.js";
+import { MutationApprovalGuard } from "../approval/mutation-approval.js";
 import type { WebsiteSummary } from "../browser/squarespace-browser.service.js";
 import { registerPagesTools } from "./pages-tools.js";
 
@@ -30,7 +31,7 @@ test("registers page tools with correct annotations and returns structured JSON"
     async captureScreenshot() {
       return "fixture-screenshot.png";
     },
-  });
+  }, new MutationApprovalGuard({ requestApproval: async () => true }));
   const backups = new PageBackupService(pages, {
     getWebsite() {
       return website;
