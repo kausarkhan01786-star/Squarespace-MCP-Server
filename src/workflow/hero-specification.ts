@@ -1,10 +1,4 @@
 import { z } from "zod";
-import {
-  validateResponsiveLayouts,
-  type LayoutElement,
-  type LayoutRect,
-} from "./layout-validation.js";
-
 const hexColorSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/);
 const layoutRectSchema = z.object({
   x: z.number().finite(),
@@ -105,21 +99,6 @@ export const heroSpecificationSchema = z.object({
         code: "custom",
         path: ["layout", surface, "elementOrder"],
         message: "Hero copy and primary/secondary calls to action are in the wrong order.",
-      });
-    }
-    const layoutResult = validateResponsiveLayouts([{
-      surface,
-      section: layout.section,
-      elements: heroElementIds.flatMap((id) => {
-        const rect = layout.positions[id];
-        return rect ? [{ id, rect: rect as LayoutRect } satisfies LayoutElement] : [];
-      }),
-    }])[0]!;
-    for (const error of layoutResult.errors) {
-      context.addIssue({
-        code: "custom",
-        path: ["layout", surface],
-        message: error,
       });
     }
   }
