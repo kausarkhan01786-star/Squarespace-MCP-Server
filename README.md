@@ -579,6 +579,15 @@ permitted. Integration status:
 | Webflow | Not implemented | Build a Webflow-specific adapter after API scopes, site identity, and publishing/draft semantics are verified |
 | HubSpot | Not implemented | Build a HubSpot CMS adapter after account identity, content APIs, and publication safeguards are verified |
 
+The read-only capability metadata in `src/capabilities/` separates universal
+capability definitions from CMS-specific operation bindings. It records
+per-operation implementation status, tools, execution mechanism, permissions,
+approval, verification, recovery, limitations, and separate evidence. Only
+`IMPLEMENTED_AND_TESTED` operations with their required permissions, approval,
+and completed verification can be reported eligible; the registry itself never
+executes CMS actions. Squarespace entries reflect the repository audit, while
+WordPress and Wix remain `UNKNOWN_NEEDS_INVESTIGATION`.
+
 ### Persistence, recovery, and security audit status
 
 No persistent workflow store is enabled. A safe next design is a
