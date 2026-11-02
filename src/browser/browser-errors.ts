@@ -64,6 +64,6 @@ export class SquarespaceBrowserError extends Error {
     options?: ErrorOptions,
   ) {
     super(message, options);
-    this.name = "SquarespaceBrowserError";
+    this.name = "SquarespaceBrowserError";  
   }
 }
