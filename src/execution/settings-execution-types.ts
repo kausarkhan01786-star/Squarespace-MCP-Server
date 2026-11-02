@@ -4,11 +4,7 @@ import type {
   ExecutionMechanism,
   RecoveryStrategy,
 } from "../capabilities/capability-types.js";
-import type {
-  PlannedValue,
-  PlannedValueType,
-  SettingsChangePlan,
-} from "../planning/settings-change-types.js";
+import type { SettingsChangePlan } from "../planning/settings-change-types.js";
 import type { SettingsPlanningProvider } from "../planning/settings-change-types.js";
 
 export type SettingsVerificationStatus =
@@ -35,17 +31,7 @@ export type SettingsRecoveryStatus =
   | "MANUAL_RECOVERY_REQUIRED"
   | "UNAVAILABLE";
 
-export interface SettingsExecutionProvider extends SettingsPlanningProvider {
-  updateField(input: {
-    readonly siteId: string;
-    readonly categoryId: string;
-    readonly fieldId: string;
-    readonly expectedCurrentValue: PlannedValue;
-    readonly proposedValue: PlannedValue;
-    readonly valueType: PlannedValueType;
-    readonly signal: AbortSignal;
-  }): Promise<void>;
-}
+export type SettingsExecutionProvider = SettingsPlanningProvider;
 
 export interface ExecuteApprovedSettingsChangeInput {
   readonly planId: string;

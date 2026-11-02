@@ -3,7 +3,6 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { MutationApprovalGuard } from "../approval/mutation-approval.js";
 import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { SettingsExecutionService } from "../execution/settings-execution-service.js";
 import { SettingsChangePlanner } from "../planning/settings-change-planner.js";
@@ -16,7 +15,6 @@ test("exposes only read-only settings execution status while no provider is veri
   const service = new SettingsExecutionService({
     planner: new SettingsChangePlanner(new Map()),
     providers: new Map(),
-    approval: new MutationApprovalGuard({ requestApproval: async () => true }),
   });
   registerSettingsExecutionTools(server, service, new BrowserOperationLock());
 

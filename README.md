@@ -686,50 +686,100 @@ npx tsx --test src/planning/settings-change-planner.test.ts src/tools/settings-c
 
 ### Approved Settings Execution Engine (Phase 6)
 
-`src/execution/settings-execution-service.ts` defines a CMS-neutral execution
-boundary for an immutable Phase 5 plan reference. Before any provider update,
-it validates the exact planned field and current value, verifies site identity
-and granted permissions, checks the current registry binding, obtains a
-proposal-bound human approval, then repeats the site, permission, and
-current-value checks. The approval binds CMS, site, category, field ID/label,
-current and requested values, operation, plan ID, and a SHA-256 plan
-fingerprint. The existing approval guard supplies expiry, one-use receipt,
-replay protection, and fail-closed behavior. Updates have a bounded timeout;
-an update error or timeout is reported as uncertain and is never retried.
+`src/execution/settings-execution-service.ts` is deliberately fail-closed.
+It can look up a stored plan and return safe status information, but every
+valid execution request is blocked with
+`ATOMIC_PROVIDER_ADAPTER_NOT_INTEGRATED`. It does not request approval, call a
+provider, or perform a settings mutation. The legacy `updateField()` provider
+contract and invocation have been removed; there is no non-CAS fallback.
+`SettingsExecutionProvider` is now read-only and used only for planning
+inspection compatibility.
 
-After a provider reports completion, the engine independently reads the field
-again. Results distinguish `VERIFIED`, `FAILED`, and `UNKNOWN`; source and
-confidence metadata are retained without returning raw setting values.
-Recovery is not attempted. Since no settings recovery provider is implemented,
-an uncertain or failed update requires manual recovery or is reported
-unavailable. Settings-update approval has its own `settings.update` scope and
-cannot be combined with Publish or authorize a content Publish operation.
-Publish is not implemented by this engine.
-
-If a provider update times out, that provider call may still be running. The
-engine signals its abort signal, reports an uncertain outcome, and blocks the
-same setting target until the provider promise settles; it never retries the
-timed-out attempt. This in-process lock is not a substitute for provider-side
-atomic site binding and compare-and-set against the expected current value.
-Any future execution provider must enforce those conditions at the mutation
-boundary before settings writes can be enabled.
+The Phase 6.4 atomic adapter contract is not yet integrated with this service.
+Consequently, the service does not claim atomic execution, idempotency,
+timeout reconciliation, or post-write verification. The service cannot retry
+or unlock an uncertain provider operation because it cannot start one.
+Settings-update approvals retain their separate `settings.update` scope and
+cannot be combined with or authorize content Publish.
 
 Repository evidence does **not** prove any Squarespace setting writable:
 timezone inspection is read-only, no settings update API or verified UI save
 path exists, and Squarespace settings update operations remain
-`NOT_IMPLEMENTED`. Accordingly, the production service is constructed with no
-execution providers, and no functional settings mutation tool is registered.
-The only new MCP tool, `get_settings_execution_status`, is read-only and
-explains the registry status and disabled state. WordPress and Wix also have no
+`NOT_IMPLEMENTED`. The production service is constructed with an empty
+provider map, and no functional settings mutation tool is registered. The
+only settings execution MCP tool, `get_settings_execution_status`, is
+read-only and reports the disabled state. WordPress and Wix also have no
 execution providers.
 
-The generic execution contract is exercised with in-memory fixture providers
-and synthetic registry bindings only; those tests do not establish live
-provider compatibility or authorize a real mutation. No live site was
-accessed. Run focused Phase 6 and approval tests with:
+The atomic contract is exercised separately with in-memory fixtures only;
+those tests do not establish live provider compatibility or authorize a real
+mutation. The execution-service regression tests prove that even a fixture
+provider cannot reach a legacy writer. No live site was accessed. Run focused
+Phase 6 and approval tests with:
 
 ```sh
 npx tsx --test src/execution/settings-execution.test.ts src/tools/settings-execution-tools.test.ts src/planning/settings-change-planner.test.ts src/tools/settings-change-planning-tools.test.ts src/capabilities/capabilities.test.ts src/approval/mutation-approval.test.ts src/approval/mcp-human-approval.integration.test.ts
+```
+
+### Synthetic Provider Contract and Conformance Tests (Phase 6.4)
+
+`src/execution/providers/settings-provider-contract.ts` defines a CMS-neutral
+adapter contract for authorized site identity, exact setting reads, atomic
+updates, independent verification, and timeout reconciliation. Each required
+provider feature has a separate evidence declaration. The eligibility gate
+requires evidence status `VERIFIED`, appropriately scoped evidence, a verified
+site and permissions, an exact `settings.update` proposal, and a valid
+provider-side concurrency precondition. Evidence is bound to the declared CMS,
+adapter, feature, and supported operation. Every record has an identity, typed
+source, reference, publisher authority, claim type, retrieval/review dates,
+trusted reviewer authority, validity state, optional expiry/supersession,
+conflict links, limitations, and verification notes. The validator checks
+authority allowlists and, for official sources, verifies that the HTTPS
+reference host matches the declared publisher authority. Duplicate IDs,
+conflicting, expired, revoked, superseded, incomplete, untrusted, or
+out-of-scope evidence fails closed.
+
+Trust outcomes are `VERIFIED`, `VERIFIED_WITH_LIMITATIONS`, `UNVERIFIED`,
+`REJECTED`, `EXPIRED`, `REVOKED`, and `CONFLICTED`. Production evidence must be
+review-approved by a reviewer authority explicitly allowlisted by policy.
+`DEFAULT_PROVIDER_EVIDENCE_VALIDATION_POLICY` trusts no publishers or
+reviewers and sets `maxEvidenceAgeMs` to `null`: no universal age is assumed,
+but records must have explicit active validity and can carry `validUntil`;
+deployments may configure a maximum review age. Limited evidence is not
+accepted for execution by default. Synthetic fixtures can qualify only for
+synthetic conformance and return `VERIFIED_WITH_LIMITATIONS`; they never count
+as production evidence. Documentation can validate a documented capability,
+but runtime-sensitive write/CAS/idempotency/reconciliation claims require an
+explicit documented guarantee or independently tested claim. Provider
+statements are never accepted as proof of independently tested runtime
+behavior.
+
+Approval eligibility recomputes the canonical
+operation fingerprint and checks the server-issued receipt with the approval
+guard; actual updates must still run inside `runAuthorized` and pass
+`assertAuthorized`. A version-token precondition carries a required version;
+an expected-value precondition is accepted only when the provider declaration
+explicitly claims that atomic mode and binds it to evidence.
+
+`src/execution/providers/synthetic-settings-provider.ts` is an in-memory
+fixture only. Its serialized critical section simulates atomic compare-and-set,
+version conflicts, idempotency records, response loss after a possible write,
+and reconciliation. The tests use `MutationApprovalGuard` receipts and bind
+the provider, site, setting, expected value/version, proposed value, execution
+ID, idempotency key, operation scope, and proposal fingerprint.
+
+Synthetic test success proves only that this in-memory model follows its
+contract. It does **not** establish or verify atomicity, idempotency, or write
+support for Squarespace, WordPress, or Wix. The synthetic adapter is not
+registered in `src/index.ts` or exposed through an MCP tool. The production
+provider map remains empty, the real CMS write capabilities remain
+unimplemented, and the settings planner remains read-only. Save and Publish
+are outside this contract.
+
+Run the mock-only conformance suite with:
+
+```sh
+npx tsx --test src/execution/providers/settings-provider-conformance.test.ts
 ```
 
 ### Persistence, recovery, and security audit status

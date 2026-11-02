@@ -49,7 +49,6 @@ async function main(): Promise<void> {
   const settingsExecution = new SettingsExecutionService({
     planner: settingsChangePlanner,
     providers: new Map(),
-    approval: mutationApproval,
   });
   const backups = new PageBackupService(pages, browser);
   const content = new SquarespaceContentService(browser, pages, backups, mutationApproval);

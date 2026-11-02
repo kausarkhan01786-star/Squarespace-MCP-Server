@@ -182,6 +182,18 @@ export class MutationApprovalGuard {
     if (receipt) this.receipts.delete(receipt);
   }
 
+  isAuthorizationValid(
+    proposal: MutationProposal,
+    receipt: MutationApprovalReceipt,
+  ): boolean {
+    const record = this.receipts.get(receipt);
+    return Boolean(
+      record &&
+      record.expiresAt > this.now().getTime() &&
+      record.proposalFingerprint === fingerprintProposal(proposal),
+    );
+  }
+
   async runAuthorized<T>(
     proposal: MutationProposal,
     receipt: MutationApprovalReceipt,
