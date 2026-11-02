@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import type { SquarespaceSettingsInspection } from "../browser/squarespace-navigation-seo-settings.service.js";
+import { SETTINGS_CATEGORY_IDS } from "../browser/squarespace-navigation-seo-settings.service.js";
 import {
   outputSchema,
   readOnlyAnnotations,
@@ -25,6 +26,22 @@ export function registerNavigationSeoSettingsTools(
 ): void {
   const runTool = (toolName: string, action: () => Promise<unknown>) =>
     executeTool(toolName, action, browserOperationLock);
+
+  server.registerTool(
+    "inspect_settings_category",
+    {
+      description: "Inspect safely readable, visible Squarespace settings values for one category. Sensitive, masked, hidden, and unsupported values are excluded; no settings are changed.",
+      inputSchema: websiteInput.extend({
+        category_id: z.enum(SETTINGS_CATEGORY_IDS),
+      }),
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    async ({ website_id, category_id }) =>
+      runTool("inspect_settings_category", () =>
+        inspection.inspectSettingsCategory(website_id, category_id),
+      ),
+  );
 
   server.registerTool(
     "list_main_navigation",

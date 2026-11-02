@@ -17,6 +17,9 @@ import { registerNavigationSeoSettingsTools } from "./tools/navigation-seo-setti
 import { registerPagesTools } from "./tools/pages-tools.js";
 import { registerWorkflowTools } from "./tools/workflow-tools.js";
 import { registerHeroTools } from "./tools/hero-tools.js";
+import { registerSettingsChangePlanningTools } from "./tools/settings-change-planning-tools.js";
+import { SettingsChangePlanner } from "./planning/settings-change-planner.js";
+import { SquarespaceSettingsPlanningProvider } from "./planning/providers/squarespace-settings-planning-provider.js";
 import { SquarespaceWorkflowAdapter } from "./workflow/squarespace-workflow.adapter.js";
 import { WebsiteWorkflowService } from "./workflow/website-workflow.service.js";
 import { logError } from "./utils/logger.js";
@@ -38,6 +41,9 @@ async function main(): Promise<void> {
   const design = new SquarespaceDesignService(browser, pages);
   const navigationSeoSettings =
     new SquarespaceNavigationSeoSettingsService(browser, pages);
+  const settingsChangePlanner = new SettingsChangePlanner(new Map([
+    ["squarespace", new SquarespaceSettingsPlanningProvider(browser, navigationSeoSettings)],
+  ]));
   const backups = new PageBackupService(pages, browser);
   const content = new SquarespaceContentService(browser, pages, backups, mutationApproval);
   const commerceProvider = new SquarespaceCommerceProvider({
@@ -67,6 +73,11 @@ async function main(): Promise<void> {
   registerContentTools(server, content, browserOperationLock);
   registerCommerceTools(server, commerce);
   registerNavigationSeoSettingsTools(server, navigationSeoSettings, browserOperationLock);
+  registerSettingsChangePlanningTools(
+    server,
+    settingsChangePlanner,
+    browserOperationLock,
+  );
   registerWorkflowTools(server, workflow, browserOperationLock);
   registerHeroTools(server);
   transport.onclose = () => {

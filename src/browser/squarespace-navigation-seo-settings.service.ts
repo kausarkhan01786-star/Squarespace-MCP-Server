@@ -57,6 +57,10 @@ export interface SquarespaceSettingsInspection {
   inspectSocialSharingSettings(websiteId: string, pageId?: string): Promise<unknown>;
   inspectPageIndexingSettings(websiteId: string, pageId: string): Promise<unknown>;
   inspectWebsiteSettings(websiteId: string): Promise<unknown>;
+  inspectSettingsCategory(
+    websiteId: string,
+    categoryId: SettingsCategoryId,
+  ): Promise<SettingsCategoryInspection>;
   inspectDomainSettings(websiteId: string): Promise<unknown>;
   inspectSiteInformation(websiteId: string): Promise<unknown>;
   inspectFavicon(websiteId: string): Promise<unknown>;
@@ -102,7 +106,7 @@ interface PageSeoInspection {
 
 interface SettingsPageData {
   pathname: string;
-  visibleText: string;
+  hasSocialLogoControl: boolean;
   headings: string[];
   fieldValues: Array<{ label: string | null; value: string }>;
   visibleImageCount: number;
@@ -139,6 +143,88 @@ const SETTINGS_CATEGORY_NAMES = [
   "Billing",
   "Developer Tools",
 ] as const;
+
+export const SETTINGS_CATEGORY_IDS = [
+  "website",
+  "domains_email",
+  "customer_notifications",
+  "selling",
+  "brand",
+  "marketing",
+  "extensions",
+  "third_party_tools",
+  "permissions_ownership",
+  "billing",
+  "developer_tools",
+] as const;
+
+export type SettingsCategoryId = typeof SETTINGS_CATEGORY_IDS[number];
+export type SettingsInspectionStatus =
+  | "AVAILABLE"
+  | "PARTIALLY_AVAILABLE"
+  | "NOT_AVAILABLE"
+  | "ACCESS_DENIED"
+  | "UNKNOWN"
+  | "ERROR";
+
+export type SettingsFieldValue = string | number | boolean | string[] | null;
+export type SettingsFieldValueType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "url"
+  | "string_list"
+  | "unknown";
+export type SettingsFieldValueStatus =
+  | "AVAILABLE"
+  | "EMPTY"
+  | "MASKED"
+  | "REDACTED"
+  | "ACCESS_DENIED"
+  | "UNSUPPORTED"
+  | "UNKNOWN"
+  | "ERROR";
+
+export interface SettingsFieldInspection {
+  fieldId: string;
+  label: string;
+  value: SettingsFieldValue;
+  valueType: SettingsFieldValueType;
+  valueStatus: SettingsFieldValueStatus;
+  source: string;
+  inspectionMethod: string;
+  confidence: number;
+  limitations: string[];
+  isSensitive: boolean;
+}
+
+export interface SettingsInspectionError {
+  code: string;
+}
+
+interface VisibleSettingsInspection {
+  fields: SettingsFieldInspection[];
+  headings: string[];
+  unsupportedLabels: string[];
+  accessDenied: boolean;
+}
+
+export interface SettingsCategoryInspection {
+  cms: "squarespace";
+  categoryId: SettingsCategoryId;
+  status: SettingsInspectionStatus;
+  fields: SettingsFieldInspection[];
+  availableValues: SettingsFieldInspection[];
+  restrictedFieldCount: number;
+  unsupportedFieldCount: number;
+  source: "squarespace_settings_ui";
+  mechanism: "browser_ui";
+  inspectionMethod: "visible_dom_controls_and_existing_inspectors";
+  inspectedAt: string;
+  limitations: string[];
+  unsupportedFields: string[];
+  errors: SettingsInspectionError[];
+}
 
 export class SquarespaceNavigationSeoSettingsService
 implements SquarespaceSettingsInspection {
@@ -399,7 +485,7 @@ implements SquarespaceSettingsInspection {
       websiteId,
       source: "squarespace_website_and_page_settings",
       website: {
-        imageUploadControlAvailable: siteSettings.visibleText.includes("Add a social logo"),
+        imageUploadControlAvailable: siteSettings.hasSocialLogoControl,
         visiblePreviewCount: siteSettings.visibleImageCount,
         currentImageDetailsAvailable: false,
       },
@@ -442,16 +528,24 @@ implements SquarespaceSettingsInspection {
 
   async inspectWebsiteSettings(websiteId: string): Promise<unknown> {
     const page = await this.openSettingsRoot(websiteId);
-    const categories = await page
-      .locator('a[data-test^="menuItem-"]')
-      .evaluateAll<Array<{ label: string; href: string }>, void>(
-        `(anchors) => anchors.flatMap((anchor) => {
+    const categories = await page.evaluate<Array<{ label: string; href: string }>>(
+      String.raw`(() => {
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0;
+      };
+      const anchors = Array.from(document.querySelectorAll('a[data-test^="menuItem-"]'));
+      return anchors.filter(isVisible).flatMap((anchor) => {
           const label = (anchor.textContent || "").trim();
           const href = anchor.getAttribute("href") || "";
           return href.startsWith("/settings/") && label ? [{ label, href }] : [];
-        })`,
-        undefined,
-      );
+        });
+      })()`,
+    );
     const availableCards: string[] = [];
     for (const title of WEBSITE_SETTING_CARDS) {
       const card = page.getByRole("button", { name: new RegExp(escapeRegExp(title)) });
@@ -472,6 +566,533 @@ implements SquarespaceSettingsInspection {
     };
   }
 
+  async inspectSettingsCategory(
+    websiteId: string,
+    categoryId: SettingsCategoryId,
+  ): Promise<SettingsCategoryInspection> {
+    const inspectedAt = new Date().toISOString();
+    const label = settingsCategoryLabel(categoryId);
+    const makeResult = (
+      fields: SettingsFieldInspection[],
+      options: {
+        status?: SettingsInspectionStatus;
+        limitations?: string[];
+        unsupportedFields?: string[];
+        errors?: SettingsInspectionError[];
+      } = {},
+    ): SettingsCategoryInspection => {
+      const availableValues = fields.filter((field) =>
+        field.valueStatus === "AVAILABLE");
+      const unsupportedFields = options.unsupportedFields ?? [];
+      const status = options.status ?? (
+        fields.length === 0
+          ? "UNKNOWN"
+        : fields.every((field) =>
+            field.valueStatus === "AVAILABLE" || field.valueStatus === "EMPTY") &&
+            unsupportedFields.length === 0
+          ? "AVAILABLE"
+            : "PARTIALLY_AVAILABLE"
+      );
+      return {
+        cms: "squarespace",
+        categoryId,
+        status,
+        fields,
+        availableValues,
+        restrictedFieldCount: fields.filter((field) =>
+          field.valueStatus === "MASKED" ||
+          field.valueStatus === "REDACTED" ||
+          field.valueStatus === "ACCESS_DENIED").length,
+        unsupportedFieldCount: new Set([
+          ...fields
+            .filter((field) => field.valueStatus === "UNSUPPORTED")
+            .map((field) => field.label),
+          ...unsupportedFields,
+        ]).size,
+        source: "squarespace_settings_ui",
+        mechanism: "browser_ui",
+        inspectionMethod: "visible_dom_controls_and_existing_inspectors",
+        inspectedAt,
+        limitations: options.limitations ?? [],
+        unsupportedFields,
+        errors: options.errors ?? [],
+      };
+    };
+
+    try {
+      if (categoryId === "website") {
+        const settings = await this.inspectWebsiteSettings(websiteId) as {
+          categories: Array<{ label: string; path: string }>;
+          websiteSettings: string[];
+        };
+        const website = this.browser.getWebsite(websiteId);
+        const page = await this.browser.getCurrentPage();
+        const inspected = await this.readVisibleSettingsFields(page, categoryId);
+        if (inspected.accessDenied) {
+          return makeResult([settingsAccessDeniedField("Website")], {
+            status: "ACCESS_DENIED",
+            limitations: ["Squarespace reported that access to Website settings is denied."],
+            unsupportedFields: ["Website settings"],
+          });
+        }
+        const fields = [
+          settingsListField("settings_categories", "Available settings categories",
+            settings.categories.map((category) => category.label)),
+          settingsListField("website_settings_cards", "Visible Website settings cards",
+            settings.websiteSettings),
+          settingsValueField(
+            "site_name",
+            "Public site name",
+            redactPrivateText(website.name),
+            "string",
+            "squarespace_account_website_listing",
+            "authenticated_website_listing",
+          ),
+          settingsValueField(
+            "website_url",
+            "Public website URL",
+            safeSquarespaceOrPublicUrl(`${new URL(website.url).origin}/`),
+            "url",
+            "squarespace_account_website_listing",
+            "authenticated_website_listing",
+          ),
+          ...inspected.fields,
+        ];
+        return makeResult(fields, {
+          limitations: [
+            "Website category cards and public site metadata are observable, but this overview does not inspect every linked Website settings screen.",
+            "Only visible, labeled controls on the current settings screen are read.",
+          ],
+          unsupportedFields: [
+            "Values on Website sub-settings screens not opened by existing inspectors",
+            "Hidden or non-rendered controls",
+          ],
+        });
+      }
+
+      if (categoryId === "domains_email") {
+        const settings = await this.inspectDomainSettings(websiteId) as {
+          visibleSections: string[];
+          domainRecordsAvailable: boolean;
+        };
+        const page = await this.browser.getCurrentPage();
+        const inspected = await this.readVisibleSettingsFields(page, categoryId);
+        if (inspected.accessDenied) {
+          return makeResult([settingsAccessDeniedField("Domains & Email")], {
+            status: "ACCESS_DENIED",
+            limitations: ["Squarespace reported that access to Domains & Email settings is denied."],
+            unsupportedFields: ["Domains & Email settings"],
+          });
+        }
+        const unsupportedFields = settings.domainRecordsAvailable
+          ? []
+          : [
+            "Configured domain records",
+            "Verified domain status",
+            "Email configuration details",
+          ];
+        return makeResult([
+          settingsListField(
+            "visible_sections",
+            "Visible Domains & Email sections",
+            settings.visibleSections,
+          ),
+          ...inspected.fields,
+        ], {
+          limitations: [
+            "The observed screen exposes setup cards, not configured domain records or verified domain status.",
+            "Only visible, labeled controls on the current settings screen are read.",
+          ],
+          unsupportedFields,
+        });
+      }
+
+      const page = await this.openSettingsRoot(websiteId);
+      const category = page.getByRole("button", { name: label, exact: true });
+      const categoryCount = await category.count();
+      if (categoryCount === 0) {
+        return makeResult([], {
+          status: "UNKNOWN",
+          limitations: [`The ${label} category was not exposed in the observed settings UI.`],
+          unsupportedFields: [`${label} settings values and controls`],
+        });
+      }
+      if (categoryCount !== 1) {
+        throw new SquarespaceBrowserError(
+          "WEBSITE_SETTINGS_NOT_AVAILABLE",
+          `Squarespace exposed an ambiguous ${label} settings category.`,
+        );
+      }
+
+      await this.clickObservedCategory(page, label);
+      await waitForExecutionDelay(150);
+      const inspected = await this.readVisibleSettingsFields(page, categoryId);
+      if (inspected.accessDenied) {
+        return makeResult([settingsAccessDeniedField(label)], {
+          status: "ACCESS_DENIED",
+          limitations: [`Squarespace reported that access to ${label} settings is denied.`],
+          unsupportedFields: [`${label} settings`],
+        });
+      }
+
+      return makeResult(inspected.fields, {
+        limitations: [
+          "Only visible, labeled controls and their exposed values are inspected.",
+          "Hidden controls, inaccessible fields, and settings outside the current category screen are not inspected.",
+          ...(inspected.headings.length === 0
+            ? ["No visible category heading was exposed."]
+            : []),
+        ],
+        unsupportedFields: [
+          ...inspected.unsupportedLabels,
+          "Hidden or non-rendered controls",
+          "Settings not exposed by the current account",
+        ],
+      });
+    } catch (error) {
+      let code = "INSPECTION_FAILED";
+      if (error instanceof SquarespaceBrowserError) {
+        code = error.code;
+      } else if (error instanceof ExecutionStoppedError) {
+        code = error.reason.toUpperCase();
+      } else if (error instanceof Error && error.name === "TimeoutError") {
+        code = "BROWSER_TIMEOUT";
+      } else if (error instanceof TypeError) {
+        code = "INSPECTION_TYPE_ERROR";
+      } else if (error instanceof ReferenceError) {
+        code = "INSPECTION_REFERENCE_ERROR";
+      } else if (error instanceof SyntaxError) {
+        code = "INSPECTION_SYNTAX_ERROR";
+      }
+      return makeResult([], {
+        status: "ERROR",
+        limitations: ["Inspection stopped before reliable settings values could be returned."],
+        unsupportedFields: [`${label} values not inspected`],
+        errors: [{ code }],
+      });
+    }
+  }
+
+  private async readVisibleSettingsFields(
+    page: Page,
+    categoryId: SettingsCategoryId,
+  ): Promise<VisibleSettingsInspection> {
+    return page.evaluate<VisibleSettingsInspection, void>(
+      String.raw`((category) => {
+        const isVisible = (element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0;
+        };
+        const accessDenied =
+          /access denied|permission denied|not authorized|you do not have permission/i
+            .test(document.body?.innerText ?? "");
+        if (accessDenied) {
+          return { fields: [], headings: [], unsupportedLabels: [], accessDenied: true };
+        }
+
+        const privateLabel =
+          /password|passcode|secret|token|api[\s_-]*key|access[\s_-]*key|credential|cookie|private[\s_-]*key|e-?mail|phone|mobile|postal address|billing address|first name|last name|full name|contact|recipient|\bname\b|birth|personal|customer|user|member|owner|account holder|card|cvv|security code|bank|routing/i;
+        const billingSafeLabel =
+          /\bplan\b|\bsubscription (?:type|plan|tier)\b|\b(?:billing|subscription) (?:frequency|interval)\b|\bcurrency\b/i;
+        const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4"))
+          .filter(isVisible)
+          .map((element) => (element.textContent ?? "").trim())
+          .filter(Boolean);
+        const fields = [];
+        const unsupportedLabels = [];
+        const controls = Array.from(document.querySelectorAll(
+          "input,textarea,select,[role='combobox'],[role='switch'],[role='radio']",
+        ));
+
+        const labelFor = (element) => {
+          const nativeLabels = "labels" in element
+            ? Array.from(element.labels ?? [])
+              .filter(isVisible)
+              .map((item) => item.innerText.trim())
+            : [];
+          const labelledBy = (element.getAttribute("aria-labelledby") ?? "")
+            .split(/\s+/)
+            .map((id) => document.getElementById(id))
+            .filter((item) => item !== null && isVisible(item))
+            .map((item) => item.innerText.trim());
+          return element.getAttribute("aria-label")?.trim() ??
+            nativeLabels.find(Boolean) ??
+            labelledBy.find(Boolean) ??
+            element.closest("label")?.textContent?.trim() ??
+            element.getAttribute("name")?.trim() ??
+            "";
+        };
+        const addField = (
+          label,
+          value,
+          valueType,
+          valueStatus,
+          inspectionMethod,
+          isSensitive,
+          limitations = [],
+        ) => {
+          const fieldId = "setting_" + (fields.length + 1);
+          fields.push({
+            fieldId,
+            label,
+            value,
+            valueType,
+            valueStatus,
+            source: "squarespace_settings_ui",
+            inspectionMethod,
+            confidence: valueStatus === "AVAILABLE" || valueStatus === "EMPTY"
+              ? 0.95
+              : valueStatus === "UNKNOWN"
+                ? 0
+                : 1,
+            limitations,
+            isSensitive,
+          });
+        };
+
+        for (const element of controls) {
+          if (!isVisible(element)) continue;
+          const input = element instanceof HTMLInputElement ? element : null;
+          const type = input?.type.toLowerCase() ?? "";
+          if (type === "hidden") continue;
+          if (["button", "submit", "reset", "image"].includes(type)) continue;
+
+          const label = labelFor(element);
+          const role = element.getAttribute("role");
+          const safePublicName = /\b(?:site|website) name\b/i.test(label);
+          const sensitive = (
+            privateLabel.test(label + " " + (input?.name ?? "")) &&
+            !(safePublicName && !privateLabel.test(input?.name ?? ""))
+          ) ||
+            (category === "billing" && !billingSafeLabel.test(label));
+          if (!label) {
+            unsupportedLabels.push("Unlabeled visible control");
+            continue;
+          }
+          if (type === "password") {
+            addField(
+              label,
+              null,
+              "unknown",
+              "MASKED",
+              "password_control_presence",
+              true,
+              ["Password values are never read."],
+            );
+            continue;
+          }
+          if (sensitive || type === "email" || type === "tel") {
+            addField(
+              label,
+              null,
+              "unknown",
+              "REDACTED",
+              "sensitive_field_classification",
+              true,
+              ["Sensitive values are not read or returned."],
+            );
+            continue;
+          }
+          if (
+            element instanceof HTMLTextAreaElement ||
+            (category === "developer_tools" && /code|script|javascript|html|injection/i.test(label))
+          ) {
+            addField(
+              label,
+              null,
+              "unknown",
+              "UNSUPPORTED",
+              "long_form_or_code_field_exclusion",
+              false,
+              ["Long-form text and code or injection contents are not inspected."],
+            );
+            unsupportedLabels.push(label);
+            continue;
+          }
+          if (type === "file") {
+            addField(
+              label,
+              null,
+              "unknown",
+              "UNSUPPORTED",
+              "file_control_exclusion",
+              false,
+              ["File contents and local file paths are not inspected."],
+            );
+            unsupportedLabels.push(label);
+            continue;
+          }
+          if (input?.type === "checkbox" || role === "switch") {
+            const checked = input
+              ? input.checked
+              : element.getAttribute("aria-checked") === "true";
+            addField(
+              label,
+              checked,
+              "boolean",
+              "AVAILABLE",
+              "visible_toggle_checked_state",
+              false,
+            );
+            continue;
+          }
+          if (input?.type === "radio" || role === "radio") {
+            const checked = input
+              ? input.checked
+              : element.getAttribute("aria-checked") === "true";
+            addField(
+              label,
+              checked,
+              "boolean",
+              "AVAILABLE",
+              "visible_radio_checked_state",
+              false,
+            );
+            continue;
+          }
+          if (element instanceof HTMLSelectElement) {
+            const selected = Array.from(element.selectedOptions)
+              .map((option) => option.label.trim())
+              .filter(Boolean);
+            const value = element.multiple
+              ? selected
+              : selected[0] ?? null;
+            addField(
+              label,
+              value,
+              element.multiple ? "string_list" : "string",
+              selected.length === 0 ? "EMPTY" : "AVAILABLE",
+              "visible_selected_native_option",
+              false,
+            );
+            continue;
+          }
+          if (role === "combobox") {
+            const exposedValue = element.getAttribute("aria-valuetext")?.trim() ||
+              element.getAttribute("aria-valuenow")?.trim() ||
+              Array.from(element.querySelectorAll("[role='option'][aria-selected='true']"))
+                .filter(isVisible)
+                .map((option) => option.textContent?.trim() ?? "")
+                .find(Boolean) ||
+              null;
+            addField(
+              label,
+              exposedValue,
+              "string",
+              exposedValue === null ? "UNKNOWN" : "AVAILABLE",
+              "visible_accessible_combobox_value",
+              false,
+              exposedValue === null
+                ? ["No selected option value was exposed through the visible accessible control."]
+                : [],
+            );
+            continue;
+          }
+
+          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+            if (!["text", "search", "url", "number", "date", "datetime-local", "time"]
+              .includes(type || "text") && !(element instanceof HTMLTextAreaElement)) {
+              addField(
+                label,
+                null,
+                "unknown",
+                "UNSUPPORTED",
+                "unsupported_control_type",
+                false,
+                ["This visible control type is not read by the settings inspector."],
+              );
+              unsupportedLabels.push(label);
+              continue;
+            }
+            const rawValue = element.value.trim();
+            if (rawValue && /^[\u2022\u25cf\u00b7\u00d7*]+$/.test(rawValue)) {
+              addField(
+                label,
+                null,
+                "unknown",
+                "MASKED",
+                "visible_masked_value",
+                true,
+                ["Masked values are never returned."],
+              );
+              continue;
+            }
+            let value = rawValue || null;
+            let valueStatus = value === null
+              ? "EMPTY"
+              : "AVAILABLE";
+            let valueType =
+              type === "url" ? "url" : type === "number" ? "number" : "string";
+            if (type === "url" && rawValue) {
+              try {
+                const url = new URL(rawValue);
+                if (
+                  !["http:", "https:"].includes(url.protocol) ||
+                  url.username ||
+                  url.password ||
+                  url.search ||
+                  url.hash
+                ) {
+                  addField(
+                    label,
+                    null,
+                    "url",
+                    "REDACTED",
+                    "unsafe_url_exclusion",
+                    true,
+                    ["URLs containing credentials, query parameters, or fragments are not returned."],
+                  );
+                  continue;
+                }
+                value = url.toString();
+              } catch {
+                value = null;
+                valueStatus = "UNKNOWN";
+              }
+            } else if (type === "number" && rawValue) {
+              const numberValue = Number(rawValue);
+              value = Number.isFinite(numberValue) ? numberValue : null;
+              if (value === null) valueStatus = "UNKNOWN";
+            }
+            addField(
+              label,
+              value,
+              valueType,
+              valueStatus,
+              element instanceof HTMLTextAreaElement
+                ? "visible_textarea_value"
+                : type === "url"
+                  ? "visible_public_url_value"
+                  : type === "number"
+                    ? "visible_number_input_value"
+                    : "visible_text_input_value",
+              false,
+            );
+            continue;
+          }
+
+          unsupportedLabels.push(label);
+          addField(
+            label,
+            null,
+            "unknown",
+            "UNSUPPORTED",
+            "unsupported_visible_control",
+            false,
+            ["The visible control does not expose a supported value representation."],
+          );
+        }
+
+        return { fields, headings, unsupportedLabels, accessDenied: false };
+      })(${JSON.stringify(categoryId)})`,
+      undefined,
+    );
+  }
+
   async inspectDomainSettings(websiteId: string): Promise<unknown> {
     const page = await this.openSettingsRoot(websiteId);
     await this.clickObservedCategory(page, "Domains & Email");
@@ -488,8 +1109,12 @@ implements SquarespaceSettingsInspection {
     });
     await waitForLocatorState(domainsCard, "visible", this.timeoutMs);
     const visibleSections = [
-      ...((await domainsCard.count()) === 1 ? ["Domains"] : []),
-      ...((await workspaceCard.count()) === 1 ? ["Google Workspace"] : []),
+      ...((await domainsCard.count()) === 1 && await domainsCard.isVisible()
+        ? ["Domains"]
+        : []),
+      ...((await workspaceCard.count()) === 1 && await workspaceCard.isVisible()
+        ? ["Google Workspace"]
+        : []),
     ];
     return {
       websiteId,
@@ -818,45 +1443,110 @@ implements SquarespaceSettingsInspection {
           rect.width > 0 &&
           rect.height > 0;
       };
+      const safeVisibleUrl = (value) => {
+        try {
+          const url = new URL(value);
+          if (
+            !["http:", "https:"].includes(url.protocol) ||
+            url.username ||
+            url.password ||
+            url.search ||
+            url.hash
+          ) {
+            return null;
+          }
+          return url.toString();
+        } catch {
+          return null;
+        }
+      };
       const fieldValues = controls.flatMap((element) => {
         if (!isVisible(element)) {
           return [];
         }
+        const input = element instanceof HTMLInputElement ? element : null;
+        const type = input?.type.toLowerCase() ?? "";
+        if (type === "hidden") {
+          return [];
+        }
         const labels = "labels" in element
-          ? Array.from(element.labels ?? []).map((label) => label.innerText.trim())
+          ? Array.from(element.labels ?? [])
+            .filter(isVisible)
+            .map((label) => label.innerText.trim())
           : [];
         const role = element.getAttribute("role");
-        const type = element.getAttribute("type");
-        const value = "value" in element
-          ? element.value
-          : (element.textContent ?? "").trim();
+        const accessibleLabel = element.getAttribute("aria-label")?.trim() ??
+          labels.find(Boolean) ??
+          input?.name ??
+          "";
+        if (
+          input?.type === "text" &&
+          input.getAttribute("aria-label") === "Add a social link or email"
+        ) {
+          return [{ label: "social_link_input", value: "" }];
+        }
+        const isPrivate = /password|passcode|secret|token|api[\s_-]*key|access[\s_-]*key|credential|cookie|private[\s_-]*key|e-?mail|phone|mobile|postal address|billing address|first name|last name|full name|contact|recipient|\bname\b|birth|personal|customer|user|member|owner|account holder|card|cvv|security code|bank|routing/i
+          .test(accessibleLabel + " " + (input?.name ?? "")) ||
+          ["password", "email", "tel"].includes(type);
+        if (isPrivate) {
+          return [];
+        }
+        if (element instanceof HTMLTextAreaElement) {
+          return [];
+        }
         if (type === "file") {
           return [{ label: "file_upload", value: "" }];
         }
         if (role === "combobox") {
           const text = (element.textContent ?? "").trim().replace(/\s+/g, " ");
-          const label = text.startsWith("Country")
+          const label = accessibleLabel.startsWith("Country") || text.startsWith("Country")
             ? "Country"
-            : text.startsWith("Time Zone")
+            : accessibleLabel.startsWith("Time Zone") || text.startsWith("Time Zone")
               ? "Time Zone"
-              : "language_combobox";
-          return [{ label, value: text }];
+              : accessibleLabel.startsWith("Language") || text.startsWith("Language")
+                ? "language_combobox"
+                : null;
+          if (!label) {
+            return [];
+          }
+          const value = element.getAttribute("aria-valuetext")?.trim() ??
+            (label === "Country"
+              ? text.replace(/^Country\s*/i, "")
+              : label === "Time Zone"
+                ? text.replace(/^Time Zone\s*/i, "")
+                : text);
+          return [{ label, value }];
         }
         if (type === "radio") {
           const label = labels[0] ?? "";
-          const checked = element.checked;
+          const checked = input?.checked ?? false;
           return checked && label
             ? [{ label: "measurement_standard", value: label }]
             : [];
         }
-        if (
-          element instanceof HTMLInputElement &&
-          element.type === "text" &&
-          element.getAttribute("aria-label") === "Add a social link or email"
-        ) {
-          return [{ label: "social_link_input", value: "" }];
+        if (type === "password") {
+          return [];
         }
-        if (element instanceof HTMLAnchorElement) {
+        let value = element instanceof HTMLInputElement ||
+            element instanceof HTMLTextAreaElement
+          ? element.value
+          : element instanceof HTMLSelectElement
+            ? Array.from(element.selectedOptions).map((option) => option.label).join(", ")
+            : "";
+        if (
+          type === "url" ||
+          /^https?:\/\//i.test(value) ||
+          /^www\./i.test(value)
+        ) {
+          const safeUrl = safeVisibleUrl(value.startsWith("www.")
+            ? "https://" + value
+            : value);
+          if (!safeUrl) {
+            return [];
+          }
+          value = safeUrl;
+        }
+        if (/^[\u2022\u25cf\u00b7\u00d7*]+$/.test(value)) {
           return [];
         }
         return labels.map((label) => ({ label, value }));
@@ -875,24 +1565,34 @@ implements SquarespaceSettingsInspection {
           ) {
             return [];
           }
-          return [{ label: "public_link", value: link.href }];
+          const safeUrl = safeVisibleUrl(link.href);
+          return safeUrl ? [{ label: "public_link", value: safeUrl }] : [];
         });
       const textLines = (document.body?.innerText ?? "").split(/\n+/)
         .map((line) => line.trim())
         .filter(Boolean);
-      const publicTextLinks = textLines.flatMap((line) =>
-        /^(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s]*)?$/i.test(line) &&
-          !line.includes("@")
-          ? [{ label: "public_link", value: line.startsWith("http") ? line : "https://" + line }]
-          : [],
-      );
+      const publicTextLinks = textLines.flatMap((line) => {
+        if (
+          !/^(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s]*)?$/i.test(line) ||
+          line.includes("@")
+        ) {
+          return [];
+        }
+        const safeUrl = safeVisibleUrl(/^https?:\/\//i.test(line)
+          ? line
+          : "https://" + line);
+        return safeUrl ? [{ label: "public_link", value: safeUrl }] : [];
+      });
       const headings = Array.from(document.querySelectorAll("h1,h2,h3"))
         .filter(isVisible)
         .map((heading) => (heading.textContent ?? "").trim())
         .filter(Boolean);
+      const hasSocialLogoControl = Array.from(document.querySelectorAll("button,[role='button']"))
+        .filter(isVisible)
+        .some((element) => (element.textContent ?? "").includes("Add a social logo"));
       return {
         pathname: window.location.pathname,
-        visibleText: document.body?.innerText ?? "",
+        hasSocialLogoControl,
         headings,
         fieldValues: [...fieldValues, ...publicLinks, ...publicTextLinks],
         visibleImageCount: Array.from(document.querySelectorAll("img")).filter(isVisible).length,
@@ -970,6 +1670,89 @@ function uniqueByLabel<T extends { label: string }>(items: T[]): T[] {
     found.add(item.label);
     return true;
   });
+}
+
+function settingsCategoryLabel(categoryId: SettingsCategoryId): string {
+  switch (categoryId) {
+    case "website":
+      return "Website";
+    case "domains_email":
+      return "Domains & Email";
+    case "customer_notifications":
+      return "Customer Notifications";
+    case "selling":
+      return "Selling";
+    case "brand":
+      return "Brand";
+    case "marketing":
+      return "Marketing";
+    case "extensions":
+      return "Extensions";
+    case "third_party_tools":
+      return "Third Party Tools";
+    case "permissions_ownership":
+      return "Permissions & Ownership";
+    case "billing":
+      return "Billing";
+    case "developer_tools":
+      return "Developer Tools";
+  }
+}
+
+function settingsListField(
+  fieldId: string,
+  label: string,
+  value: string[],
+): SettingsFieldInspection {
+  return {
+    fieldId,
+    label,
+    value,
+    valueType: "string_list",
+    valueStatus: value.length === 0 ? "EMPTY" : "AVAILABLE",
+    source: "squarespace_settings_ui",
+    inspectionMethod: "existing_read_only_settings_inspector",
+    confidence: 1,
+    limitations: [],
+    isSensitive: false,
+  };
+}
+
+function settingsAccessDeniedField(label: string): SettingsFieldInspection {
+  return {
+    fieldId: "category_access",
+    label: `${label} settings access`,
+    value: null,
+    valueType: "unknown",
+    valueStatus: "ACCESS_DENIED",
+    source: "squarespace_settings_ui",
+    inspectionMethod: "visible_access_denial_message",
+    confidence: 1,
+    limitations: ["The category could not be inspected with the current access."],
+    isSensitive: false,
+  };
+}
+
+function settingsValueField(
+  fieldId: string,
+  label: string,
+  value: string | null,
+  valueType: "string" | "url",
+  source: string,
+  inspectionMethod: string,
+): SettingsFieldInspection {
+  return {
+    fieldId,
+    label,
+    value,
+    valueType,
+    valueStatus: value === null ? "UNKNOWN" : "AVAILABLE",
+    source,
+    inspectionMethod,
+    confidence: value === null ? 0 : 1,
+    limitations: value === null ? ["No safe value was exposed by the existing inspector."] : [],
+    isSensitive: false,
+  };
 }
 
 function redactPrivateText(value: string): string {

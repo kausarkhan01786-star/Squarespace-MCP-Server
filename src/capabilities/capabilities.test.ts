@@ -126,20 +126,39 @@ test("Squarespace aggregate statuses match the Phase 1 audit", () => {
     "developer.custom_javascript": "NOT_IMPLEMENTED",
     "settings.website": "PARTIALLY_IMPLEMENTED",
     "settings.domains": "PARTIALLY_IMPLEMENTED",
-    "settings.customer_notifications": "NOT_IMPLEMENTED",
+    "settings.customer_notifications": "PARTIALLY_IMPLEMENTED",
     "commerce.management": "PARTIALLY_IMPLEMENTED",
     "brand.management": "PARTIALLY_IMPLEMENTED",
     "marketing.management": "PARTIALLY_IMPLEMENTED",
-    "extensions.management": "NOT_IMPLEMENTED",
-    "integrations.third_party": "NOT_IMPLEMENTED",
-    "account.permissions": "NOT_IMPLEMENTED",
-    "account.billing": "NOT_IMPLEMENTED",
-    "developer.tools": "NOT_IMPLEMENTED",
+    "extensions.management": "PARTIALLY_IMPLEMENTED",
+    "integrations.third_party": "PARTIALLY_IMPLEMENTED",
+    "account.permissions": "PARTIALLY_IMPLEMENTED",
+    "account.billing": "PARTIALLY_IMPLEMENTED",
+    "developer.tools": "PARTIALLY_IMPLEMENTED",
     "seo.management": "PARTIALLY_IMPLEMENTED",
     "navigation.management": "PARTIALLY_IMPLEMENTED",
   };
   for (const [capabilityId, status] of Object.entries(expected)) {
     assert.equal(getCapability("squarespace", capabilityId)?.status, status, capabilityId);
+  }
+  for (const capabilityId of [
+    "settings.customer_notifications",
+    "extensions.management",
+    "integrations.third_party",
+    "account.permissions",
+    "account.billing",
+    "developer.tools",
+  ]) {
+    assert.equal(
+      getOperationStatus("squarespace", capabilityId, "read"),
+      "IMPLEMENTED_BUT_UNVERIFIED",
+      capabilityId,
+    );
+    assert.equal(
+      getOperationStatus("squarespace", capabilityId, "update"),
+      "NOT_IMPLEMENTED",
+      capabilityId,
+    );
   }
 });
 

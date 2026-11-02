@@ -111,6 +111,20 @@ function read(
   );
 }
 
+function settingsCategoryRead(): CapabilityOperationBinding {
+  return read(
+    ["inspect_settings_category"],
+    "browser_ui",
+    ["authenticated Squarespace website access"],
+    "IMPLEMENTED_BUT_UNVERIFIED",
+    [
+      "The inspector reads only visible, labeled, non-sensitive control values and metadata supported by the current inspector.",
+      "Fixture behavior is tested; compatibility with live Squarespace settings UI remains unverified.",
+      "Hidden, masked, private, billing-sensitive, and developer-code values are excluded or redacted.",
+    ],
+  );
+}
+
 function mutationNotImplemented(): CapabilityOperationBinding {
   return { ...unavailable.create };
 }
@@ -213,6 +227,7 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
   entry("settings.website", "PARTIALLY_IMPLEMENTED", {
     read: read(
       [
+        "inspect_settings_category",
         "inspect_website_settings",
         "inspect_site_information",
         "inspect_language_settings",
@@ -227,10 +242,17 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
       ["Some values and uploaded asset details are not exposed by the observed UI."],
     ),
     update: mutationNotImplemented(),
-  }, auditEvidence),
+  }, [
+    ...auditEvidence,
+    {
+      kind: "test",
+      source: "src/browser/squarespace-settings-inspection.test.ts",
+      note: "Exercises settings category summaries using isolated UI fixtures.",
+    },
+  ]),
   entry("settings.domains", "PARTIALLY_IMPLEMENTED", {
     read: read(
-      ["inspect_domain_settings"],
+      ["inspect_settings_category", "inspect_domain_settings"],
       "browser_ui",
       ["authenticated Squarespace website access"],
       "IMPLEMENTED_BUT_UNVERIFIED",
@@ -239,14 +261,22 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
     create: mutationNotImplemented(),
     update: mutationNotImplemented(),
     delete: mutationNotImplemented(),
-  }, auditEvidence),
-  entry("settings.customer_notifications", "NOT_IMPLEMENTED", {
-    read: mutationNotImplemented(),
+  }, [
+    ...auditEvidence,
+    {
+      kind: "test",
+      source: "src/browser/squarespace-settings-inspection.test.ts",
+      note: "Exercises the Domains & Email overview using an isolated UI fixture.",
+    },
+  ]),
+  entry("settings.customer_notifications", "PARTIALLY_IMPLEMENTED", {
+    read: settingsCategoryRead(),
     update: mutationNotImplemented(),
   }, auditEvidence),
   entry("commerce.management", "PARTIALLY_IMPLEMENTED", {
     read: read(
       [
+        "inspect_settings_category",
         "get_commerce_capabilities",
         "list_products",
         "get_product_details",
@@ -270,6 +300,7 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
   entry("brand.management", "PARTIALLY_IMPLEMENTED", {
     read: read(
       [
+        "inspect_settings_category",
         "inspect_typography",
         "inspect_color_themes",
         "inspect_button_styles",
@@ -287,6 +318,7 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
   entry("marketing.management", "PARTIALLY_IMPLEMENTED", {
     read: read(
       [
+        "inspect_settings_category",
         "inspect_page_seo",
         "get_page_meta_title",
         "get_page_meta_description",
@@ -303,30 +335,30 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
     update: mutationNotImplemented(),
     delete: mutationNotImplemented(),
   }, auditEvidence),
-  entry("extensions.management", "NOT_IMPLEMENTED", {
-    read: mutationNotImplemented(),
+  entry("extensions.management", "PARTIALLY_IMPLEMENTED", {
+    read: settingsCategoryRead(),
     create: mutationNotImplemented(),
     update: mutationNotImplemented(),
     delete: mutationNotImplemented(),
   }, auditEvidence),
-  entry("integrations.third_party", "NOT_IMPLEMENTED", {
-    read: mutationNotImplemented(),
+  entry("integrations.third_party", "PARTIALLY_IMPLEMENTED", {
+    read: settingsCategoryRead(),
     create: mutationNotImplemented(),
     update: mutationNotImplemented(),
     delete: mutationNotImplemented(),
   }, auditEvidence),
-  entry("account.permissions", "NOT_IMPLEMENTED", {
-    read: mutationNotImplemented(),
+  entry("account.permissions", "PARTIALLY_IMPLEMENTED", {
+    read: settingsCategoryRead(),
     update: mutationNotImplemented(),
   }, auditEvidence),
-  entry("account.billing", "NOT_IMPLEMENTED", {
-    read: mutationNotImplemented(),
+  entry("account.billing", "PARTIALLY_IMPLEMENTED", {
+    read: settingsCategoryRead(),
     create: mutationNotImplemented(),
     update: mutationNotImplemented(),
     delete: mutationNotImplemented(),
   }, auditEvidence),
-  entry("developer.tools", "NOT_IMPLEMENTED", {
-    read: mutationNotImplemented(),
+  entry("developer.tools", "PARTIALLY_IMPLEMENTED", {
+    read: settingsCategoryRead(),
     create: mutationNotImplemented(),
     update: mutationNotImplemented(),
     delete: mutationNotImplemented(),
@@ -334,6 +366,7 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
   entry("seo.management", "PARTIALLY_IMPLEMENTED", {
     read: read(
       [
+        "inspect_settings_category",
         "inspect_page_seo",
         "get_page_meta_title",
         "get_page_meta_description",
@@ -347,6 +380,7 @@ export const squarespaceCapabilityBindings: readonly CmsCapabilityBinding[] = [
   entry("navigation.management", "PARTIALLY_IMPLEMENTED", {
     read: read(
       [
+        "inspect_settings_category",
         "get_navigation_structure",
         "list_main_navigation",
         "list_footer_navigation",

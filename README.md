@@ -588,6 +588,102 @@ and completed verification can be reported eligible; the registry itself never
 executes CMS actions. Squarespace entries reflect the repository audit, while
 WordPress and Wix remain `UNKNOWN_NEEDS_INVESTIGATION`.
 
+The `inspect_settings_category` tool reports a structured, read-only result for
+each of the eleven Squarespace settings categories: Website, Domains & Email,
+Customer Notifications, Selling, Brand, Marketing, Extensions, Third Party
+Tools, Permissions & Ownership, Billing, and Developer Tools. It returns
+visible, labeled text, number, date, and time inputs, selected native options,
+toggle and radio states, and accessible combobox values when the current UI
+exposes them.
+Website results also include the observed settings cards/categories and public
+site name/URL from the authenticated website listing. Domains & Email results
+include visible setup sections; configured domain records and verified status
+remain unavailable in the inspected screen. Existing dedicated read-only tools
+continue to inspect site language, regional settings, social links, and
+favicon/social-sharing controls where their individual observed UI paths work;
+the category overview does not navigate every Website sub-settings screen.
+
+Each field includes its type, source, inspection method, confidence, value
+status, sensitivity flag, and limitations. Empty values are reported as empty;
+masked values are never returned, and password and classified-sensitive values
+are not read. Hidden inputs are excluded. Email/contact, credential, payment,
+account-owner, and other private fields are not returned; Billing values are
+restricted except for explicitly non-sensitive plan/interval/currency labels.
+Developer Tools code and injection contents, file contents, and controls
+without a safely exposed value are unsupported or unknown. Missing fields are
+never inferred.
+
+Fixture tests verify extraction behavior and the no-mutation boundary; they do
+not establish live Squarespace UI compatibility. Registry read operations
+remain `IMPLEMENTED_BUT_UNVERIFIED` where appropriate, and no write operation
+is enabled by settings inspection. Run the fixture and related regression tests
+with:
+
+```sh
+npx tsx --test src/browser/squarespace-settings-inspection.test.ts src/capabilities/capabilities.test.ts src/tools/navigation-seo-settings-tools.test.ts src/approval/mutation-approval.test.ts src/approval/mcp-human-approval.integration.test.ts
+```
+
+### Universal Settings Change Planner (Phase 5)
+
+The CMS-neutral planner in `src/planning/` converts supported instructions or
+explicit structured requests into immutable change plans. Provider adapters
+only supply site inventory, read-only field inspection, category-to-capability
+mapping, and (when actually known) granted permission evidence. The planner
+does not depend on browser, workflow, approval-guard, or mutation services.
+Squarespace is the only configured settings planner provider; WordPress and
+Wix remain unknown until their read-only and write capabilities are audited.
+
+The `analyze_settings_change_request` tool currently recognizes requests of
+the form `Change my website timezone to Dhaka` and `enable`/`disable` requests
+for Site availability. It retains requested values verbatim rather than
+canonicalizing them. Other targets, including an announcement bar, require
+clarification unless a provider/category and exact inspected field can be
+established. For broader coverage, `preview_settings_changes` accepts an
+explicit category, field ID or label, value, and declared value type; it still
+verifies the exact field and current state using the provider's read-only
+inspection. It never trusts a caller-supplied current value.
+
+Plans retain the original instruction, parsed intents, resolved provider/site,
+current-state evidence, before/after comparison, risk factors, required
+permissions, capability status, approval policy, blocked reasons, warnings,
+and an overall status. A comparison is made only for an inspected `AVAILABLE`
+or `EMPTY` field with a compatible type; unknown, masked, redacted, denied,
+unsupported, and error values do not produce a before/after comparison. Enum
+values require provider-supplied allowed values; URL values must be safe
+HTTP(S) URLs without credentials, query strings, or fragments; object values
+are accepted only for fields explicitly typed as objects by a provider.
+
+Risk assessment is deterministic: sensitive, billing, permissions/ownership,
+and payment-related settings are critical; domain/email, developer, SEO,
+site-wide, brand, navigation, extension, third-party integration, and customer
+notification settings are high risk; unverifiable capability/state/recovery
+information increases uncertainty. Risk never grants execution permission.
+Current Squarespace `update` capability entries remain unimplemented, so
+ordinary proposed changes are blocked. Even if a future audited adapter
+produces `READY_FOR_APPROVAL`, that status is a proposal only, not an
+authorization or execution instruction. The plan's `executionEnabled` is
+always `false`; the tools are read-only and expose no save/publish/update
+action. `get_settings_change_plan` retrieves plans held in process memory.
+
+Examples:
+
+- A timezone request with an inspected current value produces a comparison,
+  but is blocked today because Squarespace settings updates are not
+  implemented.
+- `Enable the announcement bar` requests clarification because the category
+  and matching inspected field are not established; no category or value is
+  guessed.
+- A request for billing, ownership, or a credential-related setting is
+  blocked/restricted and cannot expose a current sensitive value.
+
+Planning behavior is validated with deterministic unit tests and fixture
+providers; it does not establish live Squarespace compatibility or any CMS
+write support. Run focused Phase 5 and regression tests with:
+
+```sh
+npx tsx --test src/planning/settings-change-planner.test.ts src/tools/settings-change-planning-tools.test.ts src/browser/squarespace-settings-inspection.test.ts src/capabilities/capabilities.test.ts src/tools/navigation-seo-settings-tools.test.ts src/approval/mutation-approval.test.ts src/approval/mcp-human-approval.integration.test.ts
+```
+
 ### Persistence, recovery, and security audit status
 
 No persistent workflow store is enabled. A safe next design is a

@@ -17,6 +17,7 @@ import { registerNavigationSeoSettingsTools } from "./navigation-seo-settings-to
 
 test("registers navigation, SEO, and website settings tools as read-only", async () => {
   const toolNames = [
+    "inspect_settings_category",
     "list_main_navigation",
     "list_footer_navigation",
     "inspect_navigation_item",
@@ -76,6 +77,24 @@ test("registers navigation, SEO, and website settings tools as read-only", async
     async inspectWebsiteSettings(websiteId) {
       return { method: "inspect_website_settings", websiteId };
     },
+    async inspectSettingsCategory(websiteId, categoryId) {
+      return {
+        cms: "squarespace",
+        categoryId,
+        status: "UNKNOWN",
+        fields: [],
+        availableValues: [],
+        restrictedFieldCount: 0,
+        unsupportedFieldCount: 0,
+        source: "squarespace_settings_ui",
+        mechanism: "browser_ui",
+        inspectionMethod: "visible_dom_controls_and_existing_inspectors",
+        inspectedAt: "2026-01-01T00:00:00.000Z",
+        limitations: [],
+        unsupportedFields: [],
+        errors: [],
+      };
+    },
     async inspectDomainSettings(websiteId) {
       return { method: "inspect_domain_settings", websiteId };
     },
@@ -126,14 +145,25 @@ test("registers navigation, SEO, and website settings tools as read-only", async
         name,
         arguments: needsPage
           ? { website_id: "site-1", page_id: "page-1" }
+          : name === "inspect_settings_category"
+            ? { website_id: "site-1", category_id: "billing" }
           : { website_id: "site-1" },
       });
       assert.equal(result.isError, undefined, name);
-      const value = z.object({ method: z.string() }).parse(
-        result.structuredContent?.result,
-      );
-      assert.equal(value.method, name);
-      results.set(name, value);
+      if (name === "inspect_settings_category") {
+        const value = z.object({
+          cms: z.literal("squarespace"),
+          categoryId: z.literal("billing"),
+          status: z.literal("UNKNOWN"),
+        }).parse(result.structuredContent?.result);
+        results.set(name, value);
+      } else {
+        const value = z.object({ method: z.string() }).parse(
+          result.structuredContent?.result,
+        );
+        assert.equal(value.method, name);
+        results.set(name, value);
+      }
     }
 
     const withOptionalPage = await client.callTool({
