@@ -684,6 +684,54 @@ write support. Run focused Phase 5 and regression tests with:
 npx tsx --test src/planning/settings-change-planner.test.ts src/tools/settings-change-planning-tools.test.ts src/browser/squarespace-settings-inspection.test.ts src/capabilities/capabilities.test.ts src/tools/navigation-seo-settings-tools.test.ts src/approval/mutation-approval.test.ts src/approval/mcp-human-approval.integration.test.ts
 ```
 
+### Approved Settings Execution Engine (Phase 6)
+
+`src/execution/settings-execution-service.ts` defines a CMS-neutral execution
+boundary for an immutable Phase 5 plan reference. Before any provider update,
+it validates the exact planned field and current value, verifies site identity
+and granted permissions, checks the current registry binding, obtains a
+proposal-bound human approval, then repeats the site, permission, and
+current-value checks. The approval binds CMS, site, category, field ID/label,
+current and requested values, operation, plan ID, and a SHA-256 plan
+fingerprint. The existing approval guard supplies expiry, one-use receipt,
+replay protection, and fail-closed behavior. Updates have a bounded timeout;
+an update error or timeout is reported as uncertain and is never retried.
+
+After a provider reports completion, the engine independently reads the field
+again. Results distinguish `VERIFIED`, `FAILED`, and `UNKNOWN`; source and
+confidence metadata are retained without returning raw setting values.
+Recovery is not attempted. Since no settings recovery provider is implemented,
+an uncertain or failed update requires manual recovery or is reported
+unavailable. Settings-update approval has its own `settings.update` scope and
+cannot be combined with Publish or authorize a content Publish operation.
+Publish is not implemented by this engine.
+
+If a provider update times out, that provider call may still be running. The
+engine signals its abort signal, reports an uncertain outcome, and blocks the
+same setting target until the provider promise settles; it never retries the
+timed-out attempt. This in-process lock is not a substitute for provider-side
+atomic site binding and compare-and-set against the expected current value.
+Any future execution provider must enforce those conditions at the mutation
+boundary before settings writes can be enabled.
+
+Repository evidence does **not** prove any Squarespace setting writable:
+timezone inspection is read-only, no settings update API or verified UI save
+path exists, and Squarespace settings update operations remain
+`NOT_IMPLEMENTED`. Accordingly, the production service is constructed with no
+execution providers, and no functional settings mutation tool is registered.
+The only new MCP tool, `get_settings_execution_status`, is read-only and
+explains the registry status and disabled state. WordPress and Wix also have no
+execution providers.
+
+The generic execution contract is exercised with in-memory fixture providers
+and synthetic registry bindings only; those tests do not establish live
+provider compatibility or authorize a real mutation. No live site was
+accessed. Run focused Phase 6 and approval tests with:
+
+```sh
+npx tsx --test src/execution/settings-execution.test.ts src/tools/settings-execution-tools.test.ts src/planning/settings-change-planner.test.ts src/tools/settings-change-planning-tools.test.ts src/capabilities/capabilities.test.ts src/approval/mutation-approval.test.ts src/approval/mcp-human-approval.integration.test.ts
+```
+
 ### Persistence, recovery, and security audit status
 
 No persistent workflow store is enabled. A safe next design is a

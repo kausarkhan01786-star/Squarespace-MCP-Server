@@ -46,12 +46,14 @@ export class McpHumanApprovalPrompt implements HumanApprovalPrompt {
 }
 
 export function formatProposalForHuman(proposal: MutationProposal): string {
-  const publishNotice = proposal.permissionScopes.includes("content.publish")
-    ? "This proposal explicitly requests Publish. Accepting it authorizes only the listed Publish operation."
-    : "Squarespace Save is not verified as draft-only and may make the requested change live. The proposal does not include or authorize a Publish action.";
+  const operationNotice = proposal.permissionScopes.includes("settings.update")
+    ? "This proposal authorizes only the exact settings update shown. It does not authorize page-content Save or Publish."
+    : proposal.permissionScopes.includes("content.publish")
+      ? "This proposal explicitly requests Publish. Accepting it authorizes only the listed Publish operation."
+      : "Squarespace Save is not verified as draft-only and may make the requested change live. The proposal does not include or authorize a Publish action.";
   return [
     "A Squarespace CMS mutation is requesting explicit human approval.",
-    `Review the complete immutable proposal. ${publishNotice}`,
+    `Review the complete immutable proposal. ${operationNotice}`,
     JSON.stringify({
       provider: proposal.provider,
       websiteId: proposal.websiteId,

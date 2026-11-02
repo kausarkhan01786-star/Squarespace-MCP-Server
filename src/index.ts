@@ -20,6 +20,8 @@ import { registerHeroTools } from "./tools/hero-tools.js";
 import { registerSettingsChangePlanningTools } from "./tools/settings-change-planning-tools.js";
 import { SettingsChangePlanner } from "./planning/settings-change-planner.js";
 import { SquarespaceSettingsPlanningProvider } from "./planning/providers/squarespace-settings-planning-provider.js";
+import { SettingsExecutionService } from "./execution/settings-execution-service.js";
+import { registerSettingsExecutionTools } from "./tools/settings-execution-tools.js";
 import { SquarespaceWorkflowAdapter } from "./workflow/squarespace-workflow.adapter.js";
 import { WebsiteWorkflowService } from "./workflow/website-workflow.service.js";
 import { logError } from "./utils/logger.js";
@@ -44,6 +46,11 @@ async function main(): Promise<void> {
   const settingsChangePlanner = new SettingsChangePlanner(new Map([
     ["squarespace", new SquarespaceSettingsPlanningProvider(browser, navigationSeoSettings)],
   ]));
+  const settingsExecution = new SettingsExecutionService({
+    planner: settingsChangePlanner,
+    providers: new Map(),
+    approval: mutationApproval,
+  });
   const backups = new PageBackupService(pages, browser);
   const content = new SquarespaceContentService(browser, pages, backups, mutationApproval);
   const commerceProvider = new SquarespaceCommerceProvider({
@@ -78,6 +85,7 @@ async function main(): Promise<void> {
     settingsChangePlanner,
     browserOperationLock,
   );
+  registerSettingsExecutionTools(server, settingsExecution, browserOperationLock);
   registerWorkflowTools(server, workflow, browserOperationLock);
   registerHeroTools(server);
   transport.onclose = () => {

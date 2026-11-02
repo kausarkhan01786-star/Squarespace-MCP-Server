@@ -11,7 +11,8 @@ export type MutationPermissionScope =
   | "page.delete"
   | "navigation.update"
   | "seo.update"
-  | "design.update";
+  | "design.update"
+  | "settings.update";
 
 export interface MutationProposalInput {
   readonly provider: string;
@@ -106,6 +107,15 @@ export function createMutationProposal(
     throw new MutationApprovalError(
       "invalid",
       "Saving and publishing require separate approvals and cannot share one proposal.",
+    );
+  }
+  if (
+    core.permissionScopes.includes("settings.update") &&
+    core.permissionScopes.length !== 1
+  ) {
+    throw new MutationApprovalError(
+      "invalid",
+      "A settings update requires its own exact approval proposal and scope.",
     );
   }
   return deepFreeze({
