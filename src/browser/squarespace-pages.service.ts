@@ -1,7 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Frame, Page } from "playwright";
-import type { BrowserExecutionContext } from "./browser-execution-context.js";
+import type { Frame, Locator, Page } from "playwright";
+import {
+  awaitPlaywrightOperation,
+  ExecutionStoppedError,
+  currentBrowserExecutionContext,
+  waitForExecutionDelay,
+  waitForLocatorState,
+  type BrowserExecutionContext,
+} from "./browser-execution-context.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
 import { assertAllowedSquarespaceUrl } from "./browser-security.js";
 import type { SquarespaceBrowserService, WebsiteSummary } from "./squarespace-browser.service.js";
@@ -841,9 +848,14 @@ export class SquarespacePagesService {
           );
         }
 
-        actionAttempted = true;
         execution?.beforeBrowserAction();
-        await page.locator(EDITOR_ACTION_SELECTOR).nth(publishControl.index).click();
+        actionAttempted = true;
+        execution?.markMutationStarted();
+        const publishClick = page.locator(EDITOR_ACTION_SELECTOR).nth(publishControl.index).click({
+          timeout: Math.max(1, Math.min(this.timeoutMs, execution?.remainingMs ?? this.timeoutMs)),
+        });
+        if (execution) await awaitPlaywrightOperation(publishClick, execution);
+        else await publishClick;
         await this.confirmPublishIfPrompted(page);
         await this.waitForEditorConfirmation(page, "published");
       } else {
@@ -870,9 +882,14 @@ export class SquarespacePagesService {
           );
         }
 
-        actionAttempted = true;
         execution?.beforeBrowserAction();
-        await page.locator(EDITOR_ACTION_SELECTOR).nth(saveControl.index).click();
+        actionAttempted = true;
+        execution?.markMutationStarted();
+        const saveClick = page.locator(EDITOR_ACTION_SELECTOR).nth(saveControl.index).click({
+          timeout: Math.max(1, Math.min(this.timeoutMs, execution?.remainingMs ?? this.timeoutMs)),
+        });
+        if (execution) await awaitPlaywrightOperation(saveClick, execution);
+        else await saveClick;
         await this.waitForEditorConfirmation(page, "saved", execution);
       }
 
@@ -897,6 +914,14 @@ export class SquarespacePagesService {
         inspection: { before: beforeInspection, after: afterInspection },
       };
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) {
+        throw actionAttempted && !error.mutationOutcomeUncertain
+          ? new ExecutionStoppedError(error.reason, true)
+          : error;
+      }
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new ExecutionStoppedError("browser_operation_timeout", actionAttempted);
+      }
       if (actionAttempted && !afterScreenshotAttempted) {
         afterScreenshotAttempted = true;
         try {
@@ -1101,7 +1126,7 @@ export class SquarespacePagesService {
         );
       }
       await seoTab.evaluate((element) => (element as HTMLInputElement).click());
-      await page.waitForTimeout(100);
+      await waitForExecutionDelay(100);
 
       const seoTitleField = dialog.locator('textarea[aria-label="SEO Title (Optional)"]');
       const seoDescriptionField = dialog.locator(
@@ -1139,7 +1164,7 @@ export class SquarespacePagesService {
         );
       }
       await socialImageTab.evaluate((element) => (element as HTMLInputElement).click());
-      await page.waitForTimeout(100);
+      await waitForExecutionDelay(100);
       const socialImageUploadAvailable =
         (await dialog.locator('input[type="file"]').count()) > 0;
       const socialImagePreviewCount = await dialog.locator("img").evaluateAll(
@@ -1386,7 +1411,7 @@ export class SquarespacePagesService {
     let mobile: ResponsivePageInspection;
     try {
       await page.setViewportSize(mobileViewport);
-      await delay(100);
+      await waitForExecutionDelay(100);
       mobile = await this.inspectResponsiveFrame(frame);
     } finally {
       await page.setViewportSize(originalViewport);
@@ -1645,10 +1670,13 @@ export class SquarespacePagesService {
         if (hasEditorConfirmation(await this.inspectEditor(page), expected)) {
           return;
         }
-        await delay(150);
+        await waitForExecutionDelay(150, execution);
       }
 
       execution?.checkpoint();
+      if (execution) {
+        throw new ExecutionStoppedError("browser_operation_timeout", expected === "saved");
+      }
       throw new SquarespaceBrowserError(
         "PAGE_SAVE_FAILED",
         `Squarespace did not confirm that the changes were ${expected} before the operation timed out.`,
@@ -1674,21 +1702,28 @@ export class SquarespacePagesService {
 
   private async waitForPagesPanel(page: Page): Promise<void> {
     try {
-      await page.locator(PAGES_PANEL_SELECTOR).waitFor({
-        state: "visible",
-        timeout: this.timeoutMs,
-      });
-      await page.locator(`${GROUP_SELECTOR} h2`).first().waitFor({
-        state: "visible",
-        timeout: this.timeoutMs,
-      });
+      await this.waitForLocator(page.locator(PAGES_PANEL_SELECTOR), "visible");
+      await this.waitForLocator(page.locator(`${GROUP_SELECTOR} h2`).first(), "visible");
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
       throw new SquarespaceBrowserError(
         "PAGES_PANEL_NOT_FOUND",
         "The Squarespace Pages panel did not finish loading. Confirm that the selected website is accessible and retry.",
         { cause: error },
       );
     }
+  }
+
+  private async waitForLocator(
+    locator: Locator,
+    state: "visible" | "attached",
+  ): Promise<void> {
+    await waitForLocatorState(
+      locator,
+      state,
+      this.timeoutMs,
+      currentBrowserExecutionContext(),
+    );
   }
 
   private async readPanelItems(page: Page): Promise<RawPagePanelItem[]> {
@@ -2034,10 +2069,15 @@ export class SquarespacePagesService {
 
   private async waitForPageFrame(page: Page, targetUrl: URL): Promise<Frame> {
     const targetPath = normalizePath(targetUrl.pathname);
-    const deadline = Date.now() + this.timeoutMs;
+    const execution = currentBrowserExecutionContext();
+    const deadline = Math.min(
+      Date.now() + this.timeoutMs,
+      execution?.deadlineAt ?? Number.POSITIVE_INFINITY,
+    );
     let matchingFrame: Frame | undefined;
 
     while (Date.now() < deadline) {
+      execution?.checkpoint();
       for (const frame of page.frames()) {
         let frameUrl: URL;
         try {
@@ -2055,9 +2095,11 @@ export class SquarespacePagesService {
           }
         }
       }
-      await delay(200);
+      await delay(Math.min(100, Math.max(1, deadline - Date.now())));
     }
 
+    execution?.checkpoint();
+    if (execution) throw new ExecutionStoppedError("browser_operation_timeout");
     if (matchingFrame) {
       throw new SquarespaceBrowserError(
         "SECTIONS_NOT_AVAILABLE",

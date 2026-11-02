@@ -221,7 +221,10 @@ export interface WorkflowAdapter {
     websiteId: string,
     args: PlannedTaskInput,
   ): Promise<string | null>;
-  verifyWebsite(websiteId: string): Promise<{
+  verifyWebsite(
+    websiteId: string,
+    execution?: WorkflowExecutionContext,
+  ): Promise<{
     id: string;
     name: string;
     url: string;
@@ -237,6 +240,9 @@ export interface WorkflowAdapter {
 export interface WorkflowExecutionContext {
   browser: BrowserExecutionContext;
   signal: AbortSignal;
+  deadlineAt: number;
+  workflowId: string;
+  taskId: string | undefined;
 }
 
 export interface WorkflowTask {

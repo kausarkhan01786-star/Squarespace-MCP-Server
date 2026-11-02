@@ -4,6 +4,7 @@ import { chromium } from "playwright";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { z } from "zod";
 import { SquarespaceNavigationSeoSettingsService } from "../browser/squarespace-navigation-seo-settings.service.js";
 import type {
@@ -97,7 +98,7 @@ test("registers navigation, SEO, and website settings tools as read-only", async
   const server = new McpServer({ name: "navigation-settings-test", version: "1.0.0" });
   const client = new Client({ name: "navigation-settings-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  registerNavigationSeoSettingsTools(server, inspection);
+  registerNavigationSeoSettingsTools(server, inspection, new BrowserOperationLock());
 
   try {
     await server.connect(serverTransport);

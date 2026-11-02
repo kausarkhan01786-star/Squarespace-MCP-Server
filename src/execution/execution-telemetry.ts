@@ -4,6 +4,8 @@ export type ExecutionStatus =
   | "failed"
   | "cancelled"
   | "timed_out"
+  | "browser_operation_timed_out"
+  | "api_request_timed_out"
   | "interrupted";
 
 export type ExecutionStage =

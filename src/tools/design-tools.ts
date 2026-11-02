@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { SquarespaceDesignService } from "../browser/squarespace-design.service.js";
 import { outputSchema, readOnlyAnnotations, runTool } from "./tool-helpers.js";
 
@@ -19,7 +20,11 @@ const blockInput = pageInput.extend({
 export function registerDesignTools(
   server: McpServer,
   design: SquarespaceDesignService,
+  browserOperationLock: BrowserOperationLock,
 ): void {
+  const runBrowserTool = (toolName: string, action: () => Promise<unknown>) =>
+    runTool(toolName, action, browserOperationLock);
+
   server.registerTool(
     "inspect_design_settings",
     {
@@ -29,7 +34,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id }) =>
-      runTool("inspect_design_settings", () =>
+      runBrowserTool("inspect_design_settings", () =>
         design.inspectDesignSettings(website_id),
       ),
   );
@@ -43,7 +48,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id }) =>
-      runTool("inspect_site_styles", () => design.inspectSiteStyles(website_id)),
+      runBrowserTool("inspect_site_styles", () => design.inspectSiteStyles(website_id)),
   );
 
   server.registerTool(
@@ -55,7 +60,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("inspect_typography", () =>
+      runBrowserTool("inspect_typography", () =>
         design.inspectTypography(website_id, page_id),
       ),
   );
@@ -69,7 +74,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("inspect_color_themes", () =>
+      runBrowserTool("inspect_color_themes", () =>
         design.inspectColorThemes(website_id, page_id),
       ),
   );
@@ -83,7 +88,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("inspect_button_styles", () =>
+      runBrowserTool("inspect_button_styles", () =>
         design.inspectButtonStyles(website_id, page_id),
       ),
   );
@@ -97,7 +102,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id, section_id }) =>
-      runTool("inspect_section_settings", () =>
+      runBrowserTool("inspect_section_settings", () =>
         design.inspectSectionSettings(website_id, page_id, section_id),
       ),
   );
@@ -111,7 +116,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("list_content_blocks", () =>
+      runBrowserTool("list_content_blocks", () =>
         design.listContentBlocks(website_id, page_id),
       ),
   );
@@ -125,7 +130,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id, block_id }) =>
-      runTool("inspect_content_block", () =>
+      runBrowserTool("inspect_content_block", () =>
         design.inspectContentBlock(website_id, page_id, block_id),
       ),
   );
@@ -139,7 +144,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id, block_id }) =>
-      runTool("get_block_edit_schema", () =>
+      runBrowserTool("get_block_edit_schema", () =>
         design.getBlockEditSchema(website_id, page_id, block_id),
       ),
   );
@@ -153,7 +158,7 @@ export function registerDesignTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("list_available_block_types", () =>
+      runBrowserTool("list_available_block_types", () =>
         design.listAvailableBlockTypes(website_id, page_id),
       ),
   );

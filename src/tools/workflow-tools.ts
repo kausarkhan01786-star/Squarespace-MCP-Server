@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import {
   analyzeRequirementsInputSchema,
   approveWorkflowTasksInputSchema,
@@ -16,6 +17,7 @@ import {
 export function registerWorkflowTools(
   server: McpServer,
   workflow: WebsiteWorkflowService,
+  browserOperationLock: BrowserOperationLock,
 ): void {
   server.registerTool(
     "analyze_client_requirements",
@@ -39,7 +41,11 @@ export function registerWorkflowTools(
       annotations: readOnlyAnnotations,
     },
     async (input) =>
-      runTool("plan_website_workflow", () => workflow.planWorkflow(input)),
+      runTool(
+        "plan_website_workflow",
+        () => workflow.planWorkflow(input),
+        browserOperationLock,
+      ),
   );
 
   server.registerTool(

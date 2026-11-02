@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { PageBackupService } from "./backups/page-backup.service.js";
 import { SquarespaceBrowserService } from "./browser/squarespace-browser.service.js";
+import { BrowserOperationLock } from "./browser/browser-operation-lock.js";
 import { PlaywrightBrowserProvider } from "./browser/playwright-browser.provider.js";
 import { SquarespaceContentService } from "./browser/squarespace-content.service.js";
 import { SquarespaceCommerceProvider } from "./commerce/squarespace-commerce.provider.js";
@@ -18,8 +19,10 @@ import { registerWorkflowTools } from "./tools/workflow-tools.js";
 import { registerHeroTools } from "./tools/hero-tools.js";
 import { SquarespaceWorkflowAdapter } from "./workflow/squarespace-workflow.adapter.js";
 import { WebsiteWorkflowService } from "./workflow/website-workflow.service.js";
+import { logError } from "./utils/logger.js";
 
 async function main(): Promise<void> {
+  const browserOperationLock = new BrowserOperationLock();
   const browser = new SquarespaceBrowserService();
   const pages = new SquarespacePagesService(browser);
   const browserProvider = new PlaywrightBrowserProvider(browser, pages);
@@ -46,7 +49,7 @@ async function main(): Promise<void> {
       backups,
       content,
       commerce,
-    })],
+    }, browserOperationLock)],
   ]));
   const server = new McpServer({
     name: "squarespace-mcp-server",
@@ -54,39 +57,39 @@ async function main(): Promise<void> {
   });
   const transport = new StdioServerTransport();
 
-  registerPagesTools(server, pages, backups);
-  registerDesignTools(server, design);
-  registerContentTools(server, content);
+  registerPagesTools(server, pages, backups, browserOperationLock);
+  registerDesignTools(server, design, browserOperationLock);
+  registerContentTools(server, content, browserOperationLock);
   registerCommerceTools(server, commerce);
-  registerNavigationSeoSettingsTools(server, navigationSeoSettings);
-  registerWorkflowTools(server, workflow);
+  registerNavigationSeoSettingsTools(server, navigationSeoSettings, browserOperationLock);
+  registerWorkflowTools(server, workflow, browserOperationLock);
   registerHeroTools(server);
   transport.onclose = () => {
-    void browser.close().catch((error: unknown) => {
-      console.error("Could not close the Squarespace browser cleanly.", error);
+    void browserOperationLock.runExclusive(() => browser.close()).catch((error: unknown) => {
+      logError("browser_close_failed", error);
     });
   };
   await server.connect(transport);
 
   const shutdown = async (): Promise<void> => {
     await server.close();
-    await browser.close();
+    await browserOperationLock.runExclusive(() => browser.close());
   };
   process.once("SIGINT", () => {
     void shutdown().catch((error: unknown) => {
-      console.error("Could not shut down the Squarespace MCP server cleanly.", error);
+      logError("server_shutdown_failed", error);
       process.exitCode = 1;
     });
   });
   process.once("SIGTERM", () => {
     void shutdown().catch((error: unknown) => {
-      console.error("Could not shut down the Squarespace MCP server cleanly.", error);
+      logError("server_shutdown_failed", error);
       process.exitCode = 1;
     });
   });
 }
 
 main().catch((error: unknown) => {
-  console.error("Could not start the Squarespace MCP server.", error);
+  logError("server_start_failed", error);
   process.exitCode = 1;
 });

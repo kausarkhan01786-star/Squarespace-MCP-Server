@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { addTextSectionInputSchema, SquarespaceContentService } from "../browser/squarespace-content.service.js";
 import type { SquarespacePage } from "../browser/squarespace-pages.service.js";
 import type { WebsiteSummary } from "../browser/squarespace-browser.service.js";
@@ -228,7 +229,7 @@ test("registers one guarded mutation tool and reports missing live-save approval
   const server = new McpServer({ name: "content-tools-test", version: "1.0.0" });
   const client = new Client({ name: "content-tools-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  registerContentTools(server, service);
+  registerContentTools(server, service, new BrowserOperationLock());
   try {
     await server.connect(serverTransport);
     await client.connect(clientTransport);

@@ -43,12 +43,20 @@ export interface CommercePage<T> {
 export interface CommerceProvider {
   readonly providerName: string;
   getCapabilities(): CommerceCapabilityReport;
-  verifyWebsite(websiteId: string, websiteUrl: string): Promise<void>;
-  listProducts?(cursor?: string): Promise<CommercePage<Record<string, unknown>>>;
-  getProductDetails?(productId: string): Promise<Record<string, unknown>>;
-  listInventory?(cursor?: string): Promise<CommercePage<Record<string, unknown>>>;
-  listOrders?(cursor?: string): Promise<CommercePage<SafeOrderSummary>>;
-  listDiscounts?(offset: number, limit: number): Promise<CommercePage<Record<string, unknown>>>;
+  verifyWebsite(
+    websiteId: string,
+    websiteUrl: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<void>;
+  listProducts?(cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<Record<string, unknown>>>;
+  getProductDetails?(productId: string, execution?: BrowserExecutionContext): Promise<Record<string, unknown>>;
+  listInventory?(cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<Record<string, unknown>>>;
+  listOrders?(cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<SafeOrderSummary>>;
+  listDiscounts?(
+    offset: number,
+    limit: number,
+    execution?: BrowserExecutionContext,
+  ): Promise<CommercePage<Record<string, unknown>>>;
 }
 
 export interface SafeOrderSummary {
@@ -74,3 +82,4 @@ export interface SafeOrderSummary {
     shipDate: string | null;
   }>;
 }
+import type { BrowserExecutionContext } from "../browser/browser-execution-context.js";

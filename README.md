@@ -492,13 +492,21 @@ those measurements or executes a multi-element Hero batch. Do not treat a
 batch as successful until each supported operation is executed and its result
 is independently verified.
 
-Workflow cancellation and deadlines are cooperative, not browser-process
-termination. Cancellation is observed between UI actions and in bounded editor
-waits. If a mutation is interrupted, its task remains interrupted and is not
-replayed by a subsequent execute call; inspect the actual website state before
-planning a new attempt. Execution telemetry contains only counts, durations,
-stage names, task IDs/actions, and status—never page text, credentials, cookies,
-or browser storage.
+Each workflow execution carries one abort signal, an absolute deadline, and its
+workflow/task IDs. The deadline aborts automatically. Cancellation removes a
+queued browser-lock waiter; active browser work keeps the shared lock until its
+Playwright operation settles, and Chromium navigation is stopped with
+`Page.stopLoading` without closing the shared page or context. Selector waits
+in workflow browser services poll in short cancellable intervals. Commerce
+fetches receive the signal and distinguish request timeouts from workflow
+deadlines. Playwright does not provide an abort signal for screenshot capture;
+those operations can only report cancellation after the screenshot settles or
+times out. Cancellation during a save reports that the CMS state is uncertain
+and requires verification. Interrupted mutations are never replayed
+automatically. Execution metrics distinguish user cancellation, workflow
+deadlines, browser-operation timeouts, and API-request timeouts. Telemetry
+contains only counts, durations, stage names, task IDs/actions, and status—never
+page text, credentials, cookies, or browser storage.
 
 Workflow plans and results are held in memory and disappear when the MCP server
 restarts. The service does not persist client briefs. QA reports distinguish
@@ -554,9 +562,11 @@ website-list validation, API site ID/URL matching, Zod tool schemas, explicit
 workflow approvals, and backups for the current text-section mutation. Page
 snapshots are sanitized inspection records, not restorable CMS exports; they
 have no cryptographic integrity signature. Browser operations share one
-persistent browser page, so concurrent calls across independent MCP tools are
-not globally serialized; avoid concurrent website mutations until a
-browser-wide operation lock is introduced.
+persistent browser page. A shared FIFO operation lock serializes registered
+browser-dependent MCP tools and workflow browser actions, with a 30-second
+acquisition timeout. Nested service calls reuse the current lock scope;
+Commerce API-only operations and local snapshot reads remain outside the
+browser lock.
 
 MCP tests use the SDK's in-memory client/server transport and mocked adapters;
 browser tests use fixture DOMs, and commerce tests mock `fetch`. They do not

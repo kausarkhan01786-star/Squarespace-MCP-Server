@@ -1,3 +1,5 @@
+import type { BrowserExecutionContext } from "./browser-execution-context.js";
+
 export type BrowserCapabilityName =
   | "verify_website"
   | "inspect_current_page"
@@ -72,24 +74,35 @@ export interface BrowserSectionInspection {
 export interface BrowserProvider {
   readonly providerName: string;
   getCapabilities(): BrowserCapability[];
-  verifyWebsite(websiteId: string): Promise<BrowserOperationResult<BrowserWebsite>>;
-  inspectCurrentPage(websiteId: string): Promise<BrowserOperationResult<BrowserPageInspection>>;
+  verifyWebsite(
+    websiteId: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<BrowserOperationResult<BrowserWebsite>>;
+  inspectCurrentPage(
+    websiteId: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<BrowserOperationResult<BrowserPageInspection>>;
   captureScreenshot(
     websiteId: string,
     fileName?: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserScreenshotEvidence>>;
   navigateWithinWebsite(
     websiteId: string,
     destination: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserNavigationEvidence>>;
   inspectSections(
     websiteId: string,
     pageId: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserSectionInspection[]>>;
   inspectBlocks(
     websiteId: string,
     pageId: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserBlockInspection[]>>;
+  cancelActiveOperation?(): void;
 }
 
 export function unsupportedBrowserOperation<T>(

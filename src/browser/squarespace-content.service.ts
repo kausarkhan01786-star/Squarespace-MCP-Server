@@ -1,8 +1,11 @@
 import { z } from "zod";
 import type { Page, Frame, Locator } from "playwright";
 import {
+  awaitPlaywrightOperation,
   ExecutionStoppedError,
+  waitForExecutionCondition,
   type BrowserExecutionContext,
+  withBrowserExecutionContext,
 } from "./browser-execution-context.js";
 import { ExecutionController } from "../execution/execution-controller.js";
 import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
@@ -17,6 +20,7 @@ import type {
   SquarespaceBrowserService,
   WebsiteSummary,
 } from "./squarespace-browser.service.js";
+import { logInfo } from "../utils/logger.js";
 
 const CONFIRMED_WEBSITE_HOST = "cobalt-spinach-eeah.squarespace.com";
 const SECTION_SELECTOR = SQUARESPACE_PAGE_SECTION_SELECTOR;
@@ -88,23 +92,35 @@ export class SquarespaceContentService {
       : new ExecutionController({ timeoutMs: 180_000, maxBrowserActions: 100 });
     const context = execution ?? ownedController!;
     try {
-      const result = await this.runAddTextSection(rawInput, context);
+      const result = await withBrowserExecutionContext(
+        context,
+        () => this.runAddTextSection(rawInput, context),
+      );
       if (!ownedController) return result;
       const executionMetrics = ownedController.finish("succeeded");
-      console.info("[content execution metrics]", executionMetrics);
+      logInfo("content_execution_metrics", executionMetrics);
       return { ...result, executionMetrics };
     } catch (error) {
+      const stopped = error instanceof ExecutionStoppedError &&
+          context.mutationOutcomeUncertain &&
+          !error.mutationOutcomeUncertain
+        ? new ExecutionStoppedError(error.reason, true)
+        : error;
       if (ownedController) {
-        const status = error instanceof ExecutionStoppedError
-          ? error.reason === "cancelled"
+        const status = stopped instanceof ExecutionStoppedError
+          ? stopped.reason === "cancelled"
             ? "cancelled"
-            : error.reason === "timed_out"
+            : stopped.reason === "timed_out"
               ? "timed_out"
+              : stopped.reason === "browser_operation_timeout"
+                ? "browser_operation_timed_out"
+                : stopped.reason === "api_request_timeout"
+                  ? "api_request_timed_out"
               : "interrupted"
           : "failed";
-        console.info("[content execution metrics]", ownedController.finish(status));
+        logInfo("content_execution_metrics", ownedController.finish(status));
       }
-      throw error;
+      throw stopped;
     }
   }
 
@@ -161,7 +177,7 @@ export class SquarespaceContentService {
     execution?.startStage("editor_setup");
     execution?.checkpoint();
     execution?.beforeBrowserAction();
-    await this.browser.openWebsiteUrl(input.website_id, editorUrl);
+    await this.browser.openWebsiteUrl(input.website_id, editorUrl, execution);
     const page = await this.browser.getCurrentPage();
     await this.assertPageUrl(page, editorUrl);
     execution?.recordDomInspection();
@@ -264,6 +280,7 @@ export class SquarespaceContentService {
     execution?.endStage("style_application");
 
     execution?.startStage("save");
+    execution?.checkpoint();
     const saveResult = await this.pages.savePageChanges(
       input.website_id,
       false,
@@ -301,6 +318,7 @@ export class SquarespaceContentService {
       execution,
     );
     execution?.endStage("result_verification");
+    execution?.markMutationVerified();
 
     return {
       websiteId: input.website_id,
@@ -564,16 +582,30 @@ export class SquarespaceContentService {
     execution?: BrowserExecutionContext,
   ): Promise<void> {
     execution?.recordDomInspection();
+    execution?.checkpoint();
     if ((await locator.count()) !== 1 || !(await locator.isVisible()) || !(await locator.isEnabled())) {
       throw this.editorError(`Squarespace did not expose one visible, enabled ${label} control.`);
     }
     execution?.beforeBrowserAction();
-    await locator.click({
+    const click = locator.click({
       timeout: Math.max(
         1,
         Math.min(this.timeoutMs, execution?.remainingMs ?? this.timeoutMs),
       ),
     });
+    if (execution) {
+      try {
+        await awaitPlaywrightOperation(click, execution);
+      } catch (error) {
+        if (error instanceof Error && error.name === "TimeoutError") {
+          execution.checkpoint();
+          throw new ExecutionStoppedError("browser_operation_timeout");
+        }
+        throw error;
+      }
+    } else {
+      await click;
+    }
   }
 
   private async inspectCount(locator: Locator, execution?: BrowserExecutionContext): Promise<number> {
@@ -589,23 +621,22 @@ export class SquarespaceContentService {
     const startedAt = Date.now();
     try {
       execution?.checkpoint();
-      const wait = locator.waitFor({
-        ...options,
-        timeout: Math.max(
-          1,
-          Math.min(options.timeout, execution?.remainingMs ?? options.timeout),
-        ),
-      });
       if (!execution) {
-        await wait;
-      } else {
-        await new Promise<void>((resolve, reject) => {
-          const onAbort = () => reject(new ExecutionStoppedError("cancelled"));
-          execution.signal.addEventListener("abort", onAbort, { once: true });
-          wait.then(resolve, reject).finally(() =>
-            execution.signal.removeEventListener("abort", onAbort));
-        });
+        await locator.waitFor(options);
+        return;
       }
+      await waitForExecutionCondition(
+        async () => {
+          if (options.state === "visible") return locator.isVisible();
+          const count = await locator.count();
+          return options.state === "hidden" || options.state === "detached"
+            ? count === 0
+            : count > 0;
+        },
+        Boolean,
+        execution,
+        options.timeout,
+      );
     } finally {
       execution?.recordExplicitWait(Date.now() - startedAt);
     }

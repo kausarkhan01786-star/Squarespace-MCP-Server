@@ -1,5 +1,10 @@
 import { z } from "zod";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import {
+  ExecutionStoppedError,
+  stopReasonFromSignal,
+  type BrowserExecutionContext,
+} from "../browser/browser-execution-context.js";
 import type {
   CommerceCapabilityReport,
   CommercePage,
@@ -48,6 +53,7 @@ interface SquarespaceSiteIdentity {
 export interface SquarespaceCommerceProviderOptions {
   apiKey?: string;
   expectedSiteId?: string;
+  requestTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -56,24 +62,33 @@ export class SquarespaceCommerceProvider implements CommerceProvider {
   private readonly apiKey: string | undefined;
   private readonly expectedSiteId: string | undefined;
   private readonly fetchImpl: typeof fetch;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: SquarespaceCommerceProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || undefined;
     this.expectedSiteId = options.expectedSiteId?.trim() || undefined;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+    if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new RangeError("requestTimeoutMs must be a positive safe integer in milliseconds.");
+    }
   }
 
   getCapabilities(): CommerceCapabilityReport {
     return structuredClone(capabilities);
   }
 
-  async verifyWebsite(websiteId: string, websiteUrl: string): Promise<void> {
+  async verifyWebsite(
+    websiteId: string,
+    websiteUrl: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
     this.requireConfiguration();
     if (!websiteId.trim()) {
       throw new SquarespaceBrowserError("COMMERCE_TARGET_MISMATCH", "A website ID is required.");
     }
 
-    const data = await this.request("/1.0/authorization/website");
+    const data = await this.request("/1.0/authorization/website", execution);
     const identity = parseSiteIdentity(data);
     if (identity.siteId !== this.expectedSiteId) {
       throw new SquarespaceBrowserError(
@@ -102,16 +117,16 @@ export class SquarespaceCommerceProvider implements CommerceProvider {
     }
   }
 
-  async listProducts(cursor?: string): Promise<CommercePage<Record<string, unknown>>> {
+  async listProducts(cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<Record<string, unknown>>> {
     const query = new URLSearchParams();
     if (cursor !== undefined) query.set("cursor", cursorSchema.parse(cursor));
-    const data = await this.request(`/v2/commerce/products${queryString(query)}`);
+    const data = await this.request(`/v2/commerce/products${queryString(query)}`, execution);
     return parseCursorPage(data, ["products", "result"], "product");
   }
 
-  async getProductDetails(productId: string): Promise<Record<string, unknown>> {
+  async getProductDetails(productId: string, execution?: BrowserExecutionContext): Promise<Record<string, unknown>> {
     const id = productIdSchema.parse(productId);
-    const data = await this.request(`/v2/commerce/products/${encodeURIComponent(id)}`);
+    const data = await this.request(`/v2/commerce/products/${encodeURIComponent(id)}`, execution);
     const products = parseItems(data, ["products", "result"], "product details");
     const matching = products.filter((product) => product.id === id);
     if (matching.length !== 1) {
@@ -123,17 +138,17 @@ export class SquarespaceCommerceProvider implements CommerceProvider {
     return matching[0]!;
   }
 
-  async listInventory(cursor?: string): Promise<CommercePage<Record<string, unknown>>> {
+  async listInventory(cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<Record<string, unknown>>> {
     const query = new URLSearchParams();
     if (cursor !== undefined) query.set("cursor", cursorSchema.parse(cursor));
-    const data = await this.request(`/1.0/commerce/inventory${queryString(query)}`);
+    const data = await this.request(`/1.0/commerce/inventory${queryString(query)}`, execution);
     return parseCursorPage(data, ["inventory", "result"], "inventory item", true);
   }
 
-  async listOrders(cursor?: string): Promise<CommercePage<SafeOrderSummary>> {
+  async listOrders(cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<SafeOrderSummary>> {
     const query = new URLSearchParams();
     if (cursor !== undefined) query.set("cursor", cursorSchema.parse(cursor));
-    const data = await this.request(`/1.0/commerce/orders${queryString(query)}`);
+    const data = await this.request(`/1.0/commerce/orders${queryString(query)}`, execution);
     const page = parseCursorPage(data, ["result", "orders"], "order");
     return { ...page, items: page.items.map(toSafeOrderSummary) };
   }
@@ -141,12 +156,13 @@ export class SquarespaceCommerceProvider implements CommerceProvider {
   async listDiscounts(
     offset: number,
     limit: number,
+    execution?: BrowserExecutionContext,
   ): Promise<CommercePage<Record<string, unknown>>> {
     const query = new URLSearchParams({
       offset: String(offsetSchema.parse(offset)),
       limit: String(limitSchema.parse(limit)),
     });
-    const data = await this.request(`/v1/commerce/discounts?${query.toString()}`);
+    const data = await this.request(`/v1/commerce/discounts?${query.toString()}`, execution);
     const record = asRecord(data, "discount page");
     const items = parseItemsFromRecord(record, ["discounts", "result"], "discount");
     const pageInfo = asRecord(record.pagination, "discount pagination");
@@ -170,8 +186,20 @@ export class SquarespaceCommerceProvider implements CommerceProvider {
     }
   }
 
-  private async request(path: string): Promise<unknown> {
+  private async request(
+    path: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<unknown> {
     this.requireConfiguration();
+    execution?.checkpoint();
+    const timeoutMs = Math.max(
+      1,
+      Math.min(this.requestTimeoutMs, execution?.remainingMs ?? this.requestTimeoutMs),
+    );
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal = execution
+      ? AbortSignal.any([execution.signal, timeoutSignal])
+      : timeoutSignal;
     let response: Response;
     try {
       response = await this.fetchImpl(`${API_ORIGIN}${path}`, {
@@ -180,12 +208,17 @@ export class SquarespaceCommerceProvider implements CommerceProvider {
           Authorization: `Bearer ${this.apiKey}`,
           "User-Agent": USER_AGENT,
         },
-        signal: AbortSignal.timeout(15_000),
+        signal,
       });
-    } catch {
+    } catch (error) {
+      if (execution?.signal.aborted) throw stopReasonFromSignal(execution.signal);
+      if (timeoutSignal.aborted) {
+        throw new ExecutionStoppedError("api_request_timeout");
+      }
       throw new SquarespaceBrowserError(
         "COMMERCE_API_REQUEST_FAILED",
         "The Squarespace Commerce API request could not be completed.",
+        { cause: error },
       );
     }
 
@@ -202,7 +235,11 @@ export class SquarespaceCommerceProvider implements CommerceProvider {
     try {
       const body: unknown = await response.json();
       return body;
-    } catch {
+    } catch (error) {
+      if (execution?.signal.aborted) throw stopReasonFromSignal(execution.signal);
+      if (timeoutSignal.aborted) {
+        throw new ExecutionStoppedError("api_request_timeout");
+      }
       throw invalidResponse("Squarespace returned a response that was not valid JSON.");
     }
   }

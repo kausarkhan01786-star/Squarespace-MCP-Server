@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import type { BrowserExecutionContext } from "./browser-execution-context.js";
 import { assertAllowedSquarespaceUrl, redactUrl } from "./browser-security.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
 import type {
@@ -19,7 +20,7 @@ import type { SquarespacePagesService } from "./squarespace-pages.service.js";
 
 type PlaywrightBrowser = Pick<
   SquarespaceBrowserService,
-  "getWebsite" | "inspectCurrentPage" | "captureScreenshot" | "openWebsiteUrl"
+  "getWebsite" | "inspectCurrentPage" | "captureScreenshot" | "openWebsiteUrl" | "cancelActiveNavigation"
 >;
 type PlaywrightPages = Pick<SquarespacePagesService, "inspectPageSections">;
 
@@ -53,7 +54,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   async verifyWebsite(
     websiteId: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserWebsite>> {
+    execution?.checkpoint();
     const website = this.browser.getWebsite(websiteId);
     assertAllowedSquarespaceUrl(website.url);
     return {
@@ -64,9 +67,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
 
   async inspectCurrentPage(
     websiteId: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserPageInspection>> {
-    const website = await this.requireWebsite(websiteId);
-    const inspection = await this.browser.inspectCurrentPage();
+    const website = await this.requireWebsite(websiteId, execution);
+    const inspection = await this.browser.inspectCurrentPage(execution);
     assertSameWebsite(website, inspection.url);
     return {
       status: "supported",
@@ -97,9 +101,10 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async captureScreenshot(
     websiteId: string,
     fileName?: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserScreenshotEvidence>> {
-    await this.requireCurrentWebsite(websiteId);
-    const screenshotPath = await this.browser.captureScreenshot(fileName);
+    await this.requireCurrentWebsite(websiteId, execution);
+    const screenshotPath = await this.browser.captureScreenshot(fileName, execution);
     return {
       status: "supported",
       data: {
@@ -113,11 +118,12 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async navigateWithinWebsite(
     websiteId: string,
     destination: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserNavigationEvidence>> {
-    const website = await this.requireWebsite(websiteId);
+    const website = await this.requireWebsite(websiteId, execution);
     assertSameWebsite(website, destination);
-    await this.browser.openWebsiteUrl(websiteId, destination);
-    const inspection = await this.browser.inspectCurrentPage();
+    await this.browser.openWebsiteUrl(websiteId, destination, execution);
+    const inspection = await this.browser.inspectCurrentPage(execution);
     assertSameWebsite(website, inspection.url);
     return {
       status: "supported",
@@ -128,8 +134,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async inspectSections(
     websiteId: string,
     pageId: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserSectionInspection[]>> {
-    await this.requireWebsite(websiteId);
+    await this.requireWebsite(websiteId, execution);
     const inspection = await this.pages.inspectPageSections(websiteId, pageId);
     return {
       status: "supported",
@@ -147,8 +154,9 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async inspectBlocks(
     websiteId: string,
     pageId: string,
+    execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserBlockInspection[]>> {
-    await this.requireWebsite(websiteId);
+    await this.requireWebsite(websiteId, execution);
     const inspection = await this.pages.inspectPageSections(websiteId, pageId);
     const blocks = inspection.sections.flatMap((section) =>
       section.blocks.map((block) => ({
@@ -162,17 +170,27 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     return { status: "supported", data: blocks };
   }
 
-  private async requireWebsite(websiteId: string): Promise<BrowserWebsite> {
-    const result = await this.verifyWebsite(websiteId);
+  cancelActiveOperation(): void {
+    this.browser.cancelActiveNavigation();
+  }
+
+  private async requireWebsite(
+    websiteId: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<BrowserWebsite> {
+    const result = await this.verifyWebsite(websiteId, execution);
     if (result.status === "unsupported") {
       throw new Error(result.reason);
     }
     return result.data;
   }
 
-  private async requireCurrentWebsite(websiteId: string): Promise<BrowserWebsite> {
-    const website = await this.requireWebsite(websiteId);
-    const inspection = await this.browser.inspectCurrentPage();
+  private async requireCurrentWebsite(
+    websiteId: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<BrowserWebsite> {
+    const website = await this.requireWebsite(websiteId, execution);
+    const inspection = await this.browser.inspectCurrentPage(execution);
     assertSameWebsite(website, inspection.url);
     return website;
   }

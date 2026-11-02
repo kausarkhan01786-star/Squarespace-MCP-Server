@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import { ExecutionStoppedError } from "../execution/execution-controller.js";
 import {
   type WorkflowAction,
   type WorkflowAdapter,
@@ -348,8 +349,9 @@ test("cancellation interrupts an in-flight mutation and never replays it", async
   });
   let calls = 0;
   const { adapter } = createAdapter({
-    execute: async () => {
+    execute: async (_action, _websiteId, _args, execution) => {
       calls += 1;
+      execution?.browser.markMutationStarted();
       startedResolve?.();
       await pending;
       return { changed: true };
@@ -379,11 +381,84 @@ test("cancellation interrupts an in-flight mutation and never replays it", async
 
   assert.equal(result.status, "cancelled");
   assert.equal(result.tasks[0]?.status, "interrupted");
+  assert.match(result.tasks[0]?.error ?? "", /final state is uncertain/i);
   assert.equal(result.executionMetrics.status, "cancelled");
   assert.equal(calls, 1);
   const retry = await service.executeWorkflow({ workflow_id: plan.workflowId, max_tasks: 1 });
   assert.equal(retry.status, "interrupted");
   assert.equal(calls, 1);
+});
+
+test("cancellation stops a multi-step workflow before starting the next task", async () => {
+  let startedResolve: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    startedResolve = resolve;
+  });
+  let releaseResolve: (() => void) | undefined;
+  const pending = new Promise<void>((resolve) => {
+    releaseResolve = resolve;
+  });
+  const calls: WorkflowAction[] = [];
+  const executionIds: Array<{ workflowId: string | undefined; taskId: string | undefined }> = [];
+  const { adapter } = createAdapter({
+    execute: async (action, _websiteId, _args, execution) => {
+      calls.push(action);
+      executionIds.push({
+        workflowId: execution?.workflowId,
+        taskId: execution?.taskId,
+      });
+      if (calls.length === 1) {
+        startedResolve?.();
+        await pending;
+      }
+      return {};
+    },
+  });
+  const service = createService(adapter);
+  const plan = await service.planWorkflow(planInput([
+    { action: "inspect_pages" },
+    { action: "inspect_responsive", page_id: "home" },
+  ]));
+
+  const running = service.executeWorkflow({
+    workflow_id: plan.workflowId,
+    max_tasks: 2,
+  });
+  await started;
+  service.cancelWorkflow(plan.workflowId);
+  const result = await running;
+
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.executionMetrics.status, "cancelled");
+  assert.deepEqual(calls, ["inspect_pages"]);
+  assert.deepEqual(executionIds, [{
+    workflowId: plan.workflowId,
+    taskId: plan.tasks[0]!.id,
+  }]);
+  releaseResolve?.();
+});
+
+test("reports browser and API operation timeouts as distinct execution outcomes", async () => {
+  for (const [reason, metricStatus] of [
+    ["browser_operation_timeout", "browser_operation_timed_out"],
+    ["api_request_timeout", "api_request_timed_out"],
+  ] as const) {
+    const { adapter } = createAdapter({
+      execute: async () => {
+        throw new ExecutionStoppedError(reason);
+      },
+    });
+    const service = createService(adapter);
+    const plan = await service.planWorkflow(planInput([{ action: "inspect_pages" }]));
+    const result = await service.executeWorkflow({
+      workflow_id: plan.workflowId,
+      max_tasks: 1,
+    });
+
+    assert.equal(result.status, "timed_out");
+    assert.equal(result.executionMetrics.status, metricStatus);
+    assert.equal(result.tasks[0]?.status, "interrupted");
+  }
 });
 
 test("deadline after a mutation starts marks it interrupted rather than retryable", async () => {

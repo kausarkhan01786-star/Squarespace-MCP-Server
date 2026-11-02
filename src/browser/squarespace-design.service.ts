@@ -1,4 +1,12 @@
 import type { Frame, Page } from "playwright";
+import {
+  awaitPlaywrightOperation,
+  currentBrowserExecutionContext,
+  ExecutionStoppedError,
+  waitForExecutionCondition,
+  waitForLocatorState,
+  waitForPageUrl,
+} from "./browser-execution-context.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
 import { assertAllowedSquarespaceUrl } from "./browser-security.js";
 import {
@@ -467,33 +475,58 @@ export class SquarespaceDesignService {
     await this.browser.openWebsitePages(websiteId);
     const page = await this.browser.getCurrentPage();
     const button = page.locator(STYLES_BUTTON_SELECTOR);
+    const execution = currentBrowserExecutionContext();
     try {
-      await button.waitFor({ state: "visible", timeout: this.timeoutMs });
+      await waitForLocatorState(button, "visible", this.timeoutMs, execution);
       if (await button.count() !== 1) {
         throw new SquarespaceBrowserError(
           "DESIGN_PANEL_NOT_AVAILABLE",
           "Squarespace did not expose one unambiguous Site Styles control.",
         );
       }
-      await button.click();
-      await page.waitForURL(
+      const click = button.click({
+        timeout: Math.max(1, Math.min(this.timeoutMs, execution?.remainingMs ?? this.timeoutMs)),
+      });
+      if (execution) await awaitPlaywrightOperation(click, execution);
+      else await click;
+      await waitForPageUrl(
+        page,
         (url) => url.origin === websiteOrigin &&
           url.pathname.endsWith("/config/site-styles"),
-        { timeout: this.timeoutMs },
+        this.timeoutMs,
+        execution,
       );
-      await page.waitForFunction(
-        (selector) => !Array.from(document.querySelectorAll(selector)).some((element) => {
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== "none" &&
-            style.visibility !== "hidden" &&
-            rect.width > 0 &&
-            rect.height > 0;
-        }),
-        STYLES_LOADING_SELECTOR,
-        { timeout: this.timeoutMs },
-      );
+      if (execution) {
+        await waitForExecutionCondition(
+          async () => page.locator(STYLES_LOADING_SELECTOR).evaluateAll((elements) =>
+            elements.some((element) => {
+              const style = window.getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                rect.width > 0 &&
+                rect.height > 0;
+            })),
+          (isLoading) => !isLoading,
+          execution,
+          this.timeoutMs,
+        );
+      } else {
+        await page.waitForFunction(
+          (selector) => !Array.from(document.querySelectorAll(selector)).some((element) => {
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              rect.width > 0 &&
+              rect.height > 0;
+          }),
+          STYLES_LOADING_SELECTOR,
+          { timeout: this.timeoutMs },
+        );
+      }
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
       if (error instanceof SquarespaceBrowserError) {
         throw error;
       }

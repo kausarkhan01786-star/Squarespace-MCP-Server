@@ -2,13 +2,20 @@ import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type CDPSession, type Page } from "playwright";
 import { SquarespaceBrowserError } from "./browser-errors.js";
+import {
+  awaitPlaywrightOperation,
+  currentBrowserExecutionContext,
+  ExecutionStoppedError,
+  type BrowserExecutionContext,
+} from "./browser-execution-context.js";
 import {
   assertAllowedSquarespaceUrl,
   redactUrl,
   resolveProfileDirectory,
 } from "./browser-security.js";
+import { logError, logInfo } from "../utils/logger.js";
 
 const ACCOUNT_DASHBOARD_URL = "https://account.squarespace.com/";
 const LOGIN_URL = "https://login.squarespace.com/";
@@ -93,6 +100,7 @@ export class SquarespaceBrowserService {
   private readonly loginTimeoutMs: number;
   private context: BrowserContext | undefined;
   private page: Page | undefined;
+  private navigationCancellation: Promise<void> | undefined;
   private readonly websiteDestinations = new Map<string, WebsiteSummary>();
 
   constructor(options: SquarespaceBrowserOptions = {}) {
@@ -155,11 +163,8 @@ export class SquarespaceBrowserService {
       ...signals,
       authenticated: isAuthenticatedSquarespaceDashboard(signals),
     };
-    console.info("[Squarespace auth] Browser session inspected.", {
-      profileDirectory: diagnostics.profileDirectory,
+    logInfo("squarespace_auth_session_inspected", {
       pageCount: diagnostics.pageCount,
-      url: diagnostics.url,
-      title: diagnostics.title,
       loginFormVisible: diagnostics.loginFormVisible,
       dashboardEvidenceVisible: diagnostics.dashboardEvidenceVisible,
       dashboardMarkerPresent: diagnostics.dashboardMarkerPresent,
@@ -285,7 +290,11 @@ export class SquarespaceBrowserService {
     await this.navigate(await this.getPage(), pagesUrl.toString());
   }
 
-  async openWebsiteUrl(websiteId: string, destination: string): Promise<void> {
+  async openWebsiteUrl(
+    websiteId: string,
+    destination: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
     const website = this.getWebsite(websiteId);
     const target = assertAllowedSquarespaceUrl(destination);
     const siteOrigin = new URL(website.url).origin;
@@ -295,19 +304,48 @@ export class SquarespaceBrowserService {
         "Page navigation must stay on the selected Squarespace website.",
       );
     }
-    await this.navigate(await this.getPage(), target.toString());
+    await this.navigate(await this.getPage(), target.toString(), execution);
+  }
+
+  cancelActiveNavigation(): void {
+    const page = this.page;
+    if (!page || page.isClosed() || this.navigationCancellation) return;
+    this.navigationCancellation = (async () => {
+      let session: CDPSession | undefined;
+      try {
+        session = await page.context().newCDPSession(page);
+        await session.send("Page.stopLoading");
+      } catch (error) {
+        logError("browser_navigation_cancel_failed", error);
+      } finally {
+        if (session) {
+          try {
+            await session.detach();
+          } catch (error) {
+            logError("browser_cancellation_session_detach_failed", error);
+          }
+        }
+      }
+    })().finally(() => {
+      this.navigationCancellation = undefined;
+    });
   }
 
   async getCurrentPage(): Promise<Page> {
     return this.getPage();
   }
 
-  async inspectCurrentPage(): Promise<PageInspection> {
+  async inspectCurrentPage(execution?: BrowserExecutionContext): Promise<PageInspection> {
+    const context = execution ?? currentBrowserExecutionContext();
+    context?.checkpoint();
     const page = await this.getPage();
-    const details = await page.evaluate<RawPageInspection, void>(
+    const detailsPromise = page.evaluate<RawPageInspection, void>(
       `(${collectPageDetails.toString()})()`,
       undefined,
     );
+    const details = context
+      ? await awaitPlaywrightOperation(detailsPromise, context)
+      : await detailsPromise;
 
     return {
       ...details,
@@ -316,7 +354,12 @@ export class SquarespaceBrowserService {
     };
   }
 
-  async captureScreenshot(fileName?: string): Promise<string> {
+  async captureScreenshot(
+    fileName?: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<string> {
+    const context = execution ?? currentBrowserExecutionContext();
+    context?.checkpoint();
     const page = await this.getPage();
     const safeFileName = this.validateScreenshotFileName(fileName);
     const screenshotsDirectory = join(this.profileDirectory, "screenshots");
@@ -324,9 +367,20 @@ export class SquarespaceBrowserService {
     const screenshotPath = resolve(screenshotsDirectory, safeFileName);
 
     try {
-      await page.screenshot({ path: screenshotPath, fullPage: true, timeout: this.timeoutMs });
+      const screenshot = page.screenshot({
+        path: screenshotPath,
+        fullPage: true,
+        timeout: Math.max(1, Math.min(this.timeoutMs, context?.remainingMs ?? this.timeoutMs)),
+      });
+      if (context) await awaitPlaywrightOperation(screenshot, context);
+      else await screenshot;
       return screenshotPath;
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
+      if (context && error instanceof Error && error.name === "TimeoutError") {
+        context.checkpoint();
+        throw new ExecutionStoppedError("browser_operation_timeout");
+      }
       throw new SquarespaceBrowserError(
         "SCREENSHOT_FAILED",
         "Could not capture the current page screenshot.",
@@ -419,14 +473,33 @@ export class SquarespaceBrowserService {
     }
   }
 
-  private async navigate(page: Page, destination: string): Promise<void> {
+  private async navigate(
+    page: Page,
+    destination: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
     const url = assertAllowedSquarespaceUrl(destination);
+    const context = execution ?? currentBrowserExecutionContext();
     try {
-      await page.goto(url.toString(), {
+      const navigation = page.goto(url.toString(), {
         waitUntil: "domcontentloaded",
-        timeout: this.timeoutMs,
+        timeout: Math.max(1, Math.min(this.timeoutMs, context?.remainingMs ?? this.timeoutMs)),
       });
+      if (context) {
+        await awaitPlaywrightOperation(
+          navigation,
+          context,
+          () => this.cancelActiveNavigation(),
+        );
+      } else {
+        await navigation;
+      }
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
+      if (context && error instanceof Error && error.name === "TimeoutError") {
+        context.checkpoint();
+        throw new ExecutionStoppedError("browser_operation_timeout");
+      }
       throw new SquarespaceBrowserError(
         "NAVIGATION_FAILED",
         `Could not open ${url.origin}${url.pathname}. Check connectivity and retry.`,
@@ -438,11 +511,8 @@ export class SquarespaceBrowserService {
   private async isDashboardAuthenticated(page: Page): Promise<boolean> {
     const diagnostics = await this.getAuthenticationDiagnosticsForPage(page);
     const authenticated = isAuthenticatedSquarespaceDashboard(diagnostics.signals);
-    console.info("[Squarespace auth] Authentication result.", {
-      profileDirectory: this.profileDirectory,
+    logInfo("squarespace_authentication_result", {
       pageCount: this.context?.pages().filter((candidate) => !candidate.isClosed()).length ?? 0,
-      url: redactUrl(page.url()),
-      title: diagnostics.title,
       loginFormVisible: diagnostics.signals.loginFormVisible,
       dashboardEvidenceVisible: diagnostics.signals.dashboardEvidenceVisible,
       dashboardMarkerPresent: diagnostics.signals.dashboardMarkerPresent,

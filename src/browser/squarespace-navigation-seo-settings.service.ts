@@ -1,4 +1,10 @@
 import type { Frame, Page } from "playwright";
+import {
+  ExecutionStoppedError,
+  waitForExecutionDelay,
+  waitForLocatorState,
+  waitForPageUrl,
+} from "./browser-execution-context.js";
 import { SquarespaceBrowserError } from "./browser-errors.js";
 import type {
   PageNavigationNode,
@@ -469,9 +475,10 @@ implements SquarespaceSettingsInspection {
   async inspectDomainSettings(websiteId: string): Promise<unknown> {
     const page = await this.openSettingsRoot(websiteId);
     await this.clickObservedCategory(page, "Domains & Email");
-    await page.waitForURL(
+    await waitForPageUrl(
+      page,
       (url) => url.pathname.endsWith("/config/settings/domains-email"),
-      { timeout: this.timeoutMs },
+      this.timeoutMs,
     );
     const domainsCard = page.getByRole("button", {
       name: /Register and manage domains from Squarespace or other domain sellers/,
@@ -479,7 +486,7 @@ implements SquarespaceSettingsInspection {
     const workspaceCard = page.getByRole("button", {
       name: /Sign up for Google Workspace on a monthly or annual subscription/,
     });
-    await domainsCard.waitFor({ state: "visible", timeout: this.timeoutMs });
+    await waitForLocatorState(domainsCard, "visible", this.timeoutMs);
     const visibleSections = [
       ...((await domainsCard.count()) === 1 ? ["Domains"] : []),
       ...((await workspaceCard.count()) === 1 ? ["Google Workspace"] : []),
@@ -677,7 +684,7 @@ implements SquarespaceSettingsInspection {
     }
     await settingsButton.evaluate((element) => (element as HTMLButtonElement).click());
     const dialog = page.locator('[role="dialog"]').last();
-    await dialog.waitFor({ state: "visible", timeout: this.timeoutMs });
+    await waitForLocatorState(dialog, "visible", this.timeoutMs);
     try {
       const seoTab = dialog.locator('input[aria-label="SEO"]');
       if (await seoTab.count() !== 1) {
@@ -697,10 +704,11 @@ implements SquarespaceSettingsInspection {
         };
       }
       await websiteSeoLink.evaluate((element) => (element as HTMLAnchorElement).click());
-      await page.locator('input[aria-label="SEO Title Format"]').waitFor({
-        state: "visible",
-        timeout: this.timeoutMs,
-      });
+      await waitForLocatorState(
+        page.locator('input[aria-label="SEO Title Format"]'),
+        "visible",
+        this.timeoutMs,
+      );
       const titleFormat = await page.locator('input[aria-label="SEO Title Format"]').inputValue();
       const descriptionField = page.locator('textarea[placeholder="Enter a description..."]');
       const description = await descriptionField.count() === 1
@@ -742,10 +750,11 @@ implements SquarespaceSettingsInspection {
       );
     }
     await websiteLink.evaluate((element) => (element as HTMLAnchorElement).click());
-    await page.waitForURL(
+    await waitForPageUrl(
+      page,
       (url) => url.origin === new URL(this.browser.getWebsite(websiteId).url).origin &&
         url.pathname.endsWith("/config/website"),
-      { timeout: this.timeoutMs },
+      this.timeoutMs,
     );
 
     const settingsButton = page.locator('button[aria-label="Settings"]');
@@ -757,11 +766,13 @@ implements SquarespaceSettingsInspection {
     }
     await settingsButton.evaluate((element) => (element as HTMLButtonElement).click());
     try {
-      await page.getByRole("button", { name: /Site Languages/ }).waitFor({
-        state: "visible",
-        timeout: this.timeoutMs,
-      });
+      await waitForLocatorState(
+        page.getByRole("button", { name: /Site Languages/ }),
+        "visible",
+        this.timeoutMs,
+      );
     } catch (error) {
+      if (error instanceof ExecutionStoppedError) throw error;
       throw new SquarespaceBrowserError(
         "WEBSITE_SETTINGS_NOT_AVAILABLE",
         "The Squarespace Website settings panel did not expose its observed settings cards.",
@@ -788,12 +799,13 @@ implements SquarespaceSettingsInspection {
     }
     await card.evaluate((element) => (element as HTMLButtonElement).click());
     const website = this.browser.getWebsite(websiteId);
-    await page.waitForURL(
+    await waitForPageUrl(
+      page,
       (url) => url.origin === new URL(website.url).origin &&
         url.pathname.endsWith(expectedPath),
-      { timeout: this.timeoutMs },
+      this.timeoutMs,
     );
-    await page.waitForTimeout(150);
+    await waitForExecutionDelay(150);
     return page.evaluate<SettingsPageData, void>(String.raw`(() => {
       const controls = Array.from(document.querySelectorAll(
         'input,textarea,select,[role="combobox"],[role="radio"]',

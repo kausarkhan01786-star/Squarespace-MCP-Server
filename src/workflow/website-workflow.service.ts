@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
-import { ExecutionController, ExecutionStoppedError } from "../execution/execution-controller.js";
+import {
+  ExecutionController,
+  ExecutionStoppedError,
+  awaitExecutionOperation,
+} from "../execution/execution-controller.js";
 import type { ExecutionMetrics } from "../execution/execution-telemetry.js";
+import { logError, logInfo } from "../utils/logger.js";
 import {
   analyzeRequirementsInputSchema,
   approveWorkflowTasksInputSchema,
@@ -289,6 +294,7 @@ export class WebsiteWorkflowService {
       timeoutMs: input.timeout_ms,
       maxBrowserActions: input.max_browser_actions,
       signal: cancellation.signal,
+      workflowId: workflow.id,
       now: () => this.now().getTime(),
     });
     const executedTaskIds: string[] = [];
@@ -303,7 +309,16 @@ export class WebsiteWorkflowService {
     try {
       controller.startStage("website_verification");
       controller.checkpoint();
-      const verifiedWebsite = await adapter.verifyWebsite(workflow.website.id);
+      const verifiedWebsite = await awaitExecutionOperation(
+        adapter.verifyWebsite(workflow.website.id, {
+          browser: controller,
+          signal: controller.signal,
+          deadlineAt: controller.deadlineAt,
+          workflowId: workflow.id,
+          taskId: undefined,
+        }),
+        controller,
+      );
       controller.endStage("website_verification");
       controller.checkpoint();
       if (
@@ -348,19 +363,27 @@ export class WebsiteWorkflowService {
         if (retryTaskIds.delete(task.id)) controller.recordRetry();
         task.status = "running";
         task.attempts += 1;
+        controller.setTaskId(task.id);
         workflow.updatedAt = this.now().toISOString();
-        console.info("[workflow task started]", {
-          workflowId: workflow.id,
-          taskId: task.id,
+        logInfo("workflow_task_started", {
           action: task.action,
         });
         controller.startStage("workflow_task");
         try {
-          task.result = await adapter.execute(
-            task.action,
-            workflow.website.id,
-            task.args,
-            { browser: controller, signal: cancellation.signal },
+          task.result = await awaitExecutionOperation(
+            adapter.execute(
+              task.action,
+              workflow.website.id,
+              task.args,
+              {
+                browser: controller,
+                signal: controller.signal,
+                deadlineAt: controller.deadlineAt,
+                workflowId: workflow.id,
+                taskId: task.id,
+              },
+            ),
+            controller,
           );
           controller.checkpoint();
           task.status = "succeeded";
@@ -372,31 +395,26 @@ export class WebsiteWorkflowService {
             toolName: task.toolName,
             result: task.result,
           });
-          console.info("[workflow task completed]", {
-            workflowId: workflow.id,
-            taskId: task.id,
+          logInfo("workflow_task_completed", {
             action: task.action,
           });
         } catch (error) {
           controller.endStage("workflow_task");
           if (error instanceof ExecutionStoppedError) {
-            executionStatus = error.reason === "cancelled"
-              ? "cancelled"
-              : error.reason === "timed_out"
-                ? "timed_out"
-                : "interrupted";
+            const stopped = controller.mutationOutcomeUncertain && !error.mutationOutcomeUncertain
+              ? new ExecutionStoppedError(error.reason, true)
+              : error;
+            executionStatus = executionStatusForStop(stopped);
             task.status = "interrupted";
-            task.error = error.message;
-            workflow.status = executionStatus;
+            task.error = stopped.message;
+            workflow.status = workflowStatusForExecution(executionStatus);
             break;
           }
           executionStatus = "failed";
           task.status = "failed";
           task.error = safeErrorMessage(error);
           workflow.status = "failed";
-          console.error("[workflow task failed]", {
-            workflowId: workflow.id,
-            taskId: task.id,
+          logError("workflow_task_failed", error, {
             action: task.action,
             code: error instanceof SquarespaceBrowserError ? error.code : "UNEXPECTED_ERROR",
           });
@@ -407,12 +425,8 @@ export class WebsiteWorkflowService {
       }
     } catch (error) {
       if (error instanceof ExecutionStoppedError) {
-        executionStatus = error.reason === "cancelled"
-          ? "cancelled"
-          : error.reason === "timed_out"
-            ? "timed_out"
-            : "interrupted";
-        workflow.status = executionStatus;
+        executionStatus = executionStatusForStop(error);
+        workflow.status = workflowStatusForExecution(executionStatus);
       } else {
         executionStatus = "failed";
         workflow.status = "failed";
@@ -430,8 +444,7 @@ export class WebsiteWorkflowService {
         workflow.status = deriveStatus(workflow.tasks, executionStatus === "failed");
       }
       workflow.executionMetrics = controller.finish(executionStatus);
-      console.info("[workflow execution metrics]", {
-        workflowId: workflow.id,
+      logInfo("workflow_execution_metrics", {
         ...workflow.executionMetrics,
       });
     }
@@ -460,7 +473,7 @@ export class WebsiteWorkflowService {
         status: workflow.status,
       };
     }
-    controller.abort();
+    controller.abort(new ExecutionStoppedError("cancelled"));
     return {
       workflowId,
       cancellationRequested: true,
@@ -687,6 +700,33 @@ function deriveStatus(tasks: WorkflowTask[], failed: boolean): WebsiteWorkflow["
   }
   if (tasks.some((task) => task.status === "unsupported")) return "partial";
   return "completed";
+}
+
+function executionStatusForStop(error: ExecutionStoppedError): ExecutionMetrics["status"] {
+  switch (error.reason) {
+    case "cancelled":
+      return "cancelled";
+    case "timed_out":
+      return "timed_out";
+    case "browser_operation_timeout":
+      return "browser_operation_timed_out";
+    case "api_request_timeout":
+      return "api_request_timed_out";
+    case "action_budget_exceeded":
+      return "interrupted";
+  }
+}
+
+function workflowStatusForExecution(
+  status: ExecutionMetrics["status"],
+): WebsiteWorkflow["status"] {
+  if (status === "cancelled") return "cancelled";
+  if (
+    status === "timed_out" ||
+    status === "browser_operation_timed_out" ||
+    status === "api_request_timed_out"
+  ) return "timed_out";
+  return "interrupted";
 }
 
 function responsiveCheck(result: unknown): WorkflowQaReport["checks"][number] {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PageBackupService } from "../backups/page-backup.service.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { SquarespacePagesService } from "../browser/squarespace-pages.service.js";
 import {
   outputSchema,
@@ -28,7 +29,11 @@ export function registerPagesTools(
   server: McpServer,
   pages: SquarespacePagesService,
   backups: PageBackupService,
+  browserOperationLock: BrowserOperationLock,
 ): void {
+  const runBrowserTool = (toolName: string, action: () => Promise<unknown>) =>
+    runTool(toolName, action, browserOperationLock);
+
   server.registerTool(
     "list_websites",
     {
@@ -37,7 +42,7 @@ export function registerPagesTools(
       outputSchema,
       annotations: readOnlyAnnotations,
     },
-    async () => runTool("list_websites", () => pages.listWebsites()),
+    async () => runBrowserTool("list_websites", () => pages.listWebsites()),
   );
 
   server.registerTool(
@@ -49,8 +54,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("create_page_snapshot", () =>
-        backups.createPageSnapshot(website_id, page_id),
+      runBrowserTool(
+        "create_page_snapshot",
+        () => backups.createPageSnapshot(website_id, page_id),
       ),
   );
 
@@ -86,8 +92,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, group }) =>
-      runTool("list_pages", () =>
-        pages.listPages(website_id, group),
+      runBrowserTool(
+        "list_pages",
+        () => pages.listPages(website_id, group),
       ),
   );
 
@@ -100,8 +107,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("get_page_details", () =>
-        pages.getPageDetails(website_id, page_id),
+      runBrowserTool(
+        "get_page_details",
+        () => pages.getPageDetails(website_id, page_id),
       ),
   );
 
@@ -114,7 +122,7 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("get_page_url", () => pages.getPageUrl(website_id, page_id)),
+      runBrowserTool("get_page_url", () => pages.getPageUrl(website_id, page_id)),
   );
 
   server.registerTool(
@@ -126,8 +134,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id }) =>
-      runTool("get_navigation_structure", () =>
-        pages.getNavigationStructure(website_id),
+      runBrowserTool(
+        "get_navigation_structure",
+        () => pages.getNavigationStructure(website_id),
       ),
   );
 
@@ -140,8 +149,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id }) =>
-      runTool("list_not_linked_pages", () =>
-        pages.listNotLinkedPages(website_id),
+      runBrowserTool(
+        "list_not_linked_pages",
+        () => pages.listNotLinkedPages(website_id),
       ),
   );
 
@@ -154,8 +164,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("list_page_sections", () =>
-        pages.listPageSections(website_id, page_id),
+      runBrowserTool(
+        "list_page_sections",
+        () => pages.listPageSections(website_id, page_id),
       ),
   );
 
@@ -168,8 +179,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id, section_id }) =>
-      runTool("inspect_section", () =>
-        pages.inspectSection(website_id, page_id, section_id),
+      runBrowserTool(
+        "inspect_section",
+        () => pages.inspectSection(website_id, page_id, section_id),
       ),
   );
 
@@ -182,8 +194,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("inspect_mobile_responsive", () =>
-        pages.inspectMobileResponsive(website_id, page_id),
+      runBrowserTool(
+        "inspect_mobile_responsive",
+        () => pages.inspectMobileResponsive(website_id, page_id),
       ),
   );
 
@@ -196,8 +209,9 @@ export function registerPagesTools(
       annotations: readOnlyAnnotations,
     },
     async ({ website_id, page_id }) =>
-      runTool("inspect_page_sections", () =>
-        pages.inspectPageSections(website_id, page_id),
+      runBrowserTool(
+        "inspect_page_sections",
+        () => pages.inspectPageSections(website_id, page_id),
       ),
   );
 }

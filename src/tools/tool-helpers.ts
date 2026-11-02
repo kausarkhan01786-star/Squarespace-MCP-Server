@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import type { BrowserOperationLock } from "../browser/browser-operation-lock.js";
+import { logError } from "../utils/logger.js";
 
 export const outputSchema = z.object({ result: z.unknown() });
 
@@ -13,13 +15,16 @@ export const readOnlyAnnotations = {
 export async function runTool(
   toolName: string,
   action: () => Promise<unknown>,
+  browserOperationLock?: BrowserOperationLock,
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   structuredContent?: { result: unknown };
   isError?: boolean;
 }> {
   try {
-    const result = await action();
+    const result = browserOperationLock
+      ? await browserOperationLock.runExclusive(action)
+      : await action();
     return {
       content: [{ type: "text", text: JSON.stringify({ result }) }],
       structuredContent: { result },
@@ -31,11 +36,10 @@ export async function runTool(
           code: "UNEXPECTED_ERROR",
           message: "The operation failed unexpectedly. Check server diagnostics without exposing credentials.",
         };
-    if (error instanceof SquarespaceBrowserError) {
-      console.error(`[${toolName}] ${detail.code}: ${detail.message}`);
-    } else {
-      console.error(`[${toolName}] UNEXPECTED_ERROR`);
-    }
+    logError("mcp_tool_failed", error, {
+      toolName,
+      code: detail.code,
+    });
     return {
       isError: true,
       content: [{ type: "text", text: JSON.stringify({ error: detail }) }],

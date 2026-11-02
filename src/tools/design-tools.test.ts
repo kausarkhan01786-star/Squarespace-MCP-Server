@@ -10,6 +10,7 @@ import {
   verifyDesignMutationGuard,
 } from "../browser/design-mutation-guard.js";
 import { SquarespaceDesignService } from "../browser/squarespace-design.service.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import type { PageSnapshot } from "../backups/page-backup.service.js";
 import type { WebsiteSummary } from "../browser/squarespace-browser.service.js";
 import { registerDesignTools } from "./design-tools.js";
@@ -98,7 +99,7 @@ test("registers ten read-only design tools and returns observed DOM metadata", a
   const server = new McpServer({ name: "design-tools-test", version: "1.0.0" });
   const client = new Client({ name: "design-tools-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  registerDesignTools(server, design);
+  registerDesignTools(server, design, new BrowserOperationLock());
 
   try {
     await server.connect(serverTransport);

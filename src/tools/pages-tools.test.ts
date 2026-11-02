@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PageBackupService } from "../backups/page-backup.service.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { SquarespacePagesService } from "../browser/squarespace-pages.service.js";
 import type { WebsiteSummary } from "../browser/squarespace-browser.service.js";
 import { registerPagesTools } from "./pages-tools.js";
@@ -42,7 +43,7 @@ test("registers page tools with correct annotations and returns structured JSON"
   const server = new McpServer({ name: "tool-registry-test", version: "1.0.0" });
   const client = new Client({ name: "tool-registry-test-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  registerPagesTools(server, pages, backups);
+  registerPagesTools(server, pages, backups, new BrowserOperationLock());
 
   try {
     await server.connect(serverTransport);

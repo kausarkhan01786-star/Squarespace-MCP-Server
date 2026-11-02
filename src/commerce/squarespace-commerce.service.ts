@@ -1,4 +1,6 @@
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import type { BrowserExecutionContext } from "../browser/browser-execution-context.js";
+import { logInfo } from "../utils/logger.js";
 import type { SquarespaceBrowserService, WebsiteSummary } from "../browser/squarespace-browser.service.js";
 import type {
   CommerceOperation,
@@ -20,39 +22,39 @@ export class SquarespaceCommerceService {
     return this.provider.getCapabilities();
   }
 
-  async listProducts(websiteId: string, cursor?: string): Promise<CommercePage<Record<string, unknown>>> {
+  async listProducts(websiteId: string, cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<Record<string, unknown>>> {
     this.assertAvailable("list_products");
-    await this.verifyTarget(websiteId);
+    await this.verifyTarget(websiteId, execution);
     if (!this.provider.listProducts) this.throwUnavailable("list_products");
-    const result = await this.provider.listProducts(cursor);
-    this.logResult("list_products", websiteId, result.items.length);
+    const result = await this.provider.listProducts(cursor, execution);
+    this.logResult("list_products", result.items.length);
     return result;
   }
 
-  async getProductDetails(websiteId: string, productId: string): Promise<Record<string, unknown>> {
+  async getProductDetails(websiteId: string, productId: string, execution?: BrowserExecutionContext): Promise<Record<string, unknown>> {
     this.assertAvailable("get_product_details");
-    await this.verifyTarget(websiteId);
+    await this.verifyTarget(websiteId, execution);
     if (!this.provider.getProductDetails) this.throwUnavailable("get_product_details");
-    const result = await this.provider.getProductDetails(productId);
-    this.logResult("get_product_details", websiteId, 1);
+    const result = await this.provider.getProductDetails(productId, execution);
+    this.logResult("get_product_details", 1);
     return result;
   }
 
-  async listInventory(websiteId: string, cursor?: string): Promise<CommercePage<Record<string, unknown>>> {
+  async listInventory(websiteId: string, cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<Record<string, unknown>>> {
     this.assertAvailable("list_inventory");
-    await this.verifyTarget(websiteId);
+    await this.verifyTarget(websiteId, execution);
     if (!this.provider.listInventory) this.throwUnavailable("list_inventory");
-    const result = await this.provider.listInventory(cursor);
-    this.logResult("list_inventory", websiteId, result.items.length);
+    const result = await this.provider.listInventory(cursor, execution);
+    this.logResult("list_inventory", result.items.length);
     return result;
   }
 
-  async listOrders(websiteId: string, cursor?: string): Promise<CommercePage<SafeOrderSummary>> {
+  async listOrders(websiteId: string, cursor?: string, execution?: BrowserExecutionContext): Promise<CommercePage<SafeOrderSummary>> {
     this.assertAvailable("list_orders");
-    await this.verifyTarget(websiteId);
+    await this.verifyTarget(websiteId, execution);
     if (!this.provider.listOrders) this.throwUnavailable("list_orders");
-    const result = await this.provider.listOrders(cursor);
-    this.logResult("list_orders", websiteId, result.items.length);
+    const result = await this.provider.listOrders(cursor, execution);
+    this.logResult("list_orders", result.items.length);
     return result;
   }
 
@@ -60,16 +62,21 @@ export class SquarespaceCommerceService {
     websiteId: string,
     offset: number,
     limit: number,
+    execution?: BrowserExecutionContext,
   ): Promise<CommercePage<Record<string, unknown>>> {
     this.assertAvailable("list_discounts");
-    await this.verifyTarget(websiteId);
+    await this.verifyTarget(websiteId, execution);
     if (!this.provider.listDiscounts) this.throwUnavailable("list_discounts");
-    const result = await this.provider.listDiscounts(offset, limit);
-    this.logResult("list_discounts", websiteId, result.items.length);
+    const result = await this.provider.listDiscounts(offset, limit, execution);
+    this.logResult("list_discounts", result.items.length);
     return result;
   }
 
-  private async verifyTarget(websiteId: string): Promise<void> {
+  private async verifyTarget(
+    websiteId: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<void> {
+    execution?.checkpoint();
     let website: WebsiteSummary;
     try {
       website = this.browser.getWebsite(websiteId);
@@ -81,7 +88,7 @@ export class SquarespaceCommerceService {
         { cause: error },
       );
     }
-    await this.provider.verifyWebsite(websiteId, website.url);
+    await this.provider.verifyWebsite(websiteId, website.url, execution);
   }
 
   private assertAvailable(operation: CommerceOperation): void {
@@ -102,7 +109,7 @@ export class SquarespaceCommerceService {
     );
   }
 
-  private logResult(operation: CommerceOperation, websiteId: string, resultCount: number): void {
-    console.info("[Squarespace commerce]", { operation, websiteId, resultCount });
+  private logResult(operation: CommerceOperation, resultCount: number): void {
+    logInfo("squarespace_commerce_result", { operation, resultCount });
   }
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { WorkflowAction } from "./workflow-types.js";
 import { SquarespaceWorkflowAdapter } from "./squarespace-workflow.adapter.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 
 const website = {
   id: "site-123",
@@ -93,7 +94,10 @@ function createAdapter(browserProvider = {
       },
     },
   } as unknown as ConstructorParameters<typeof SquarespaceWorkflowAdapter>[0];
-  return { adapter: new SquarespaceWorkflowAdapter(services), calls };
+  return {
+    adapter: new SquarespaceWorkflowAdapter(services, new BrowserOperationLock()),
+    calls,
+  };
 }
 
 function task(action: WorkflowAction, values: Record<string, unknown> = {}) {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ExecutionController, ExecutionStoppedError } from "../execution/execution-controller.js";
 import { SquarespaceCommerceProvider } from "./squarespace-commerce.provider.js";
 
 const websiteUrl = "https://shop.example.squarespace.com";
@@ -72,6 +73,63 @@ test("rejects a URL mismatch between the browser listing and API key", async () 
     () => provider.verifyWebsite("browser-site-hash", "https://other.example.squarespace.com"),
     { code: "COMMERCE_TARGET_MISMATCH" },
   );
+});
+
+test("passes execution cancellation to in-flight Commerce API fetches", async () => {
+  const controller = new ExecutionController({
+    timeoutMs: 5_000,
+    maxBrowserActions: 2,
+  });
+  let observedSignal: AbortSignal | undefined;
+  const provider = new SquarespaceCommerceProvider({
+    apiKey: "test-key",
+    expectedSiteId: "api-site-1",
+    fetchImpl: (_input, init) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) throw new Error("Expected an abort signal on the API request.");
+      observedSignal = signal;
+      observedSignal.addEventListener("abort", () => {
+        reject(new DOMException("Aborted", "AbortError"));
+      }, { once: true });
+    }),
+  });
+
+  const request = provider.listProducts(undefined, controller);
+  await Promise.resolve();
+  controller.abort(new ExecutionStoppedError("cancelled"));
+  await assert.rejects(
+    request,
+    (error: unknown) =>
+      error instanceof ExecutionStoppedError && error.reason === "cancelled",
+  );
+  assert.equal(observedSignal?.aborted, true);
+  controller.finish("cancelled");
+});
+
+test("reports an API request timeout distinctly from a workflow deadline", async () => {
+  const controller = new ExecutionController({
+    timeoutMs: 5_000,
+    maxBrowserActions: 2,
+  });
+  const provider = new SquarespaceCommerceProvider({
+    apiKey: "test-key",
+    expectedSiteId: "api-site-1",
+    requestTimeoutMs: 10,
+    fetchImpl: (_input, init) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) throw new Error("Expected an abort signal on the API request.");
+      signal.addEventListener("abort", () => {
+        reject(new DOMException("Aborted", "AbortError"));
+      }, { once: true });
+    }),
+  });
+
+  await assert.rejects(
+    provider.listProducts(undefined, controller),
+    (error: unknown) =>
+      error instanceof ExecutionStoppedError && error.reason === "api_request_timeout",
+  );
+  controller.finish("api_request_timed_out");
 });
 
 test("requires API credentials without making a network request", async () => {

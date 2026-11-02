@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpServer as ProtocolMcpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { registerWorkflowTools } from "./workflow-tools.js";
 import { WebsiteWorkflowService } from "../workflow/website-workflow.service.js";
 import type { WorkflowAdapter } from "../workflow/workflow-types.js";
@@ -33,7 +34,7 @@ test("registers the complete workflow MCP surface", () => {
     },
   } as unknown as McpServer;
   const workflow = new WebsiteWorkflowService(new Map());
-  registerWorkflowTools(server, workflow);
+  registerWorkflowTools(server, workflow, new BrowserOperationLock());
 
   assert.deepEqual(registered, [
     "analyze_client_requirements",
@@ -70,7 +71,7 @@ test("serves workflow discovery and requirement analysis over MCP protocol", asy
   const server = new ProtocolMcpServer({ name: "workflow-integration-test", version: "1.0.0" });
   const client = new Client({ name: "workflow-integration-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  registerWorkflowTools(server, service);
+  registerWorkflowTools(server, service, new BrowserOperationLock());
 
   try {
     await server.connect(serverTransport);

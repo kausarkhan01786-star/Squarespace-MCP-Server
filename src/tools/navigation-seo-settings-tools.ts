@@ -1,7 +1,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import type { SquarespaceSettingsInspection } from "../browser/squarespace-navigation-seo-settings.service.js";
-import { outputSchema, readOnlyAnnotations, runTool } from "./tool-helpers.js";
+import {
+  outputSchema,
+  readOnlyAnnotations,
+  runTool as executeTool,
+} from "./tool-helpers.js";
 
 const websiteInput = z.object({
   website_id: z.string().trim().min(1).describe("ID returned by list_websites."),
@@ -16,7 +21,11 @@ const optionalPageInput = websiteInput.extend({
 export function registerNavigationSeoSettingsTools(
   server: McpServer,
   inspection: SquarespaceSettingsInspection,
+  browserOperationLock: BrowserOperationLock,
 ): void {
+  const runTool = (toolName: string, action: () => Promise<unknown>) =>
+    executeTool(toolName, action, browserOperationLock);
+
   server.registerTool(
     "list_main_navigation",
     {

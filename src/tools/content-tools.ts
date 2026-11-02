@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import {
   addTextSectionInputSchema,
   SquarespaceContentService,
@@ -8,6 +9,7 @@ import { outputSchema, runTool } from "./tool-helpers.js";
 export function registerContentTools(
   server: McpServer,
   content: SquarespaceContentService,
+  browserOperationLock: BrowserOperationLock,
 ): void {
   server.registerTool(
     "add_text_section",
@@ -23,6 +25,10 @@ export function registerContentTools(
       },
     },
     async (input) =>
-      runTool("add_text_section", () => content.addTextSection(input)),
+      runTool(
+        "add_text_section",
+        () => content.addTextSection(input),
+        browserOperationLock,
+      ),
   );
 }

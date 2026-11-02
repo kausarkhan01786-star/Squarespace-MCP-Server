@@ -1,4 +1,5 @@
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import type { BrowserProvider } from "../browser/browser-provider.js";
 import type { PageBackupService } from "../backups/page-backup.service.js";
 import type { SquarespaceCommerceService } from "../commerce/squarespace-commerce.service.js";
@@ -114,10 +115,24 @@ const COMMERCE_TOOLS: Partial<Record<WorkflowAction, string>> = {
   inspect_discounts: "list_discounts",
 };
 
+const BROWSER_ACTIONS = new Set<WorkflowAction>([
+  "inspect_pages",
+  "inspect_page",
+  "inspect_page_sections",
+  "inspect_responsive",
+  "inspect_page_seo",
+  "inspect_design",
+  "backup_page",
+  "add_text_section",
+]);
+
 export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
   readonly cms = "squarespace";
 
-  constructor(private readonly services: WorkflowServices) {}
+  constructor(
+    private readonly services: WorkflowServices,
+    private readonly browserOperationLock: BrowserOperationLock,
+  ) {}
 
   getCapabilities(): WorkflowCapability[] {
     const commerceAvailability = new Map(
@@ -190,14 +205,21 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
     }
   }
 
-  async verifyWebsite(websiteId: string): Promise<{
+  async verifyWebsite(
+    websiteId: string,
+    execution?: WorkflowExecutionContext,
+  ): Promise<{
     id: string;
     name: string;
     url: string;
   }> {
     let result: Awaited<ReturnType<BrowserProvider["verifyWebsite"]>>;
     try {
-      result = await this.services.browserProvider.verifyWebsite(websiteId);
+      execution?.browser.checkpoint();
+      result = await this.services.browserProvider.verifyWebsite(
+        websiteId,
+        execution?.browser,
+      );
     } catch (error) {
       if (error instanceof SquarespaceBrowserError && error.code === "INVALID_URL") {
         throw new SquarespaceBrowserError(
@@ -227,7 +249,27 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
     args: PlannedTaskInput,
     execution?: WorkflowExecutionContext,
   ): Promise<unknown> {
-    const website = await this.verifyWebsite(websiteId);
+    const operation = () => this.executeTask(action, websiteId, args, execution);
+    if (!execution) return operation();
+    if (!BROWSER_ACTIONS.has(action)) {
+      return operation();
+    }
+    return this.browserOperationLock.runExclusive(operation, {
+      signal: execution.signal,
+      deadlineAt: execution.deadlineAt,
+      executionContext: execution.browser,
+      onAbort: () => this.services.browserProvider.cancelActiveOperation?.(),
+    });
+  }
+
+  private async executeTask(
+    action: WorkflowAction,
+    websiteId: string,
+    args: PlannedTaskInput,
+    execution?: WorkflowExecutionContext,
+  ): Promise<unknown> {
+    execution?.browser.checkpoint();
+    const website = await this.verifyWebsite(websiteId, execution);
     const pageId = args.page_id;
     switch (action) {
       case "inspect_pages":
@@ -245,21 +287,23 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
       case "backup_page":
         return this.services.backups.createPageSnapshot(website.id, required(pageId, action));
       case "inspect_products":
-        return this.services.commerce.listProducts(website.id, args.cursor);
+        return this.services.commerce.listProducts(website.id, args.cursor, execution?.browser);
       case "inspect_product":
         return this.services.commerce.getProductDetails(
           website.id,
           required(args.product_id, action),
+          execution?.browser,
         );
       case "inspect_inventory":
-        return this.services.commerce.listInventory(website.id, args.cursor);
+        return this.services.commerce.listInventory(website.id, args.cursor, execution?.browser);
       case "inspect_orders":
-        return this.services.commerce.listOrders(website.id, args.cursor);
+        return this.services.commerce.listOrders(website.id, args.cursor, execution?.browser);
       case "inspect_discounts":
         return this.services.commerce.listDiscounts(
           website.id,
           args.offset ?? 0,
           args.limit ?? 50,
+          execution?.browser,
         );
       case "add_text_section":
         if (!args.text || args.confirm_potentially_live_save !== true) {
