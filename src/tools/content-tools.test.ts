@@ -38,6 +38,14 @@ const homePage: SquarespacePage = {
   url: "https://cobalt-spinach-eeah.squarespace.com/",
   visibilityStatus: "enabled",
   enabled: true,
+  identity: {
+    kind: "synthetic",
+    native_id: null,
+    synthetic_id: "home-1",
+    title: "Home",
+    slug: "home",
+    is_homepage: true,
+  },
 };
 
 function createApprovalGuard(approve = true): MutationApprovalGuard {

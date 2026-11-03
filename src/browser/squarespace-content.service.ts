@@ -34,6 +34,27 @@ import { logInfo } from "../utils/logger.js";
 const CONFIRMED_WEBSITE_HOST = "cobalt-spinach-eeah.squarespace.com";
 const SECTION_SELECTOR = SQUARESPACE_PAGE_SECTION_SELECTOR;
 const BLOCK_SELECTOR = "[data-block-type]";
+const SITE_FRAME_SELECTOR = 'iframe#sqs-site-frame[data-testid="sqs-site-frame"], iframe#sqs-site-frame';
+const SAVE_CONTROL_SELECTORS = [
+  '[data-test="frameToolbarSave"]',
+  'button:has-text("Save")',
+];
+const EXIT_CONTROL_SELECTORS = [
+  '[data-test="frameToolbarCancel"]',
+  'button:has-text("Exit")',
+];
+const ADD_SECTION_CONTROL_SELECTORS = [
+  '[data-test="section-add-button"]',
+  'button:has-text("Add Section")',
+];
+const ADD_BLOCK_CONTROL_SELECTORS = [
+  'button:has-text("Add Block")',
+  '[aria-label="Add Block"]',
+];
+const SECTION_SETTINGS_CONTROL_SELECTORS = [
+  '[data-test="toolbar-button-settings"]',
+  'button[aria-label="Open Section Settings"]',
+];
 
 export const addTextSectionInputSchema = z.object({
   website_id: z.string().trim().min(1).describe("ID returned by list_websites for Kausar Mia."),
@@ -242,19 +263,23 @@ export class SquarespaceContentService {
     const frame = await this.findHomeFrame(page, homeUrl);
     const sectionsBefore = frame.locator(SECTION_SELECTOR);
     const initialSectionCount = await this.inspectCount(sectionsBefore, execution);
-    if (initialSectionCount !== backup.sections.length) {
-      throw this.editorError(
-        "The rendered Home section count does not match the fresh backup; no page content was changed.",
-      );
-    }
     execution?.recordDomInspection();
     const observedSectionIds = await sectionsBefore.evaluateAll((sections) =>
       sections.map((section) => section.getAttribute("data-section-id")),
     );
+    const backupSectionIds = backup.sections.map((section) => section.id);
+    const observedStartsAt = backupSectionIds.length - observedSectionIds.length;
+    const observedMatchesFullBackup =
+      observedSectionIds.length === backupSectionIds.length &&
+      observedSectionIds.every((sectionId, index) => sectionId === backupSectionIds[index]);
+    const observedMatchesBackupSuffix =
+      observedSectionIds.length > 0 &&
+      observedStartsAt >= 0 &&
+      observedSectionIds.every((sectionId, index) =>
+        sectionId !== null && sectionId === backupSectionIds[observedStartsAt + index]);
     if (
-      backup.sections.some((section) => section.id === null) ||
-      observedSectionIds.some((sectionId, index) =>
-        sectionId === null || sectionId !== backup.sections[index]?.id)
+      backupSectionIds.some((sectionId) => sectionId === null) ||
+      (!observedMatchesFullBackup && !observedMatchesBackupSuffix)
     ) {
       throw this.editorError(
         "The rendered Home sections do not match the fresh backup; no page content was changed.",
@@ -263,15 +288,13 @@ export class SquarespaceContentService {
     execution?.beforeBrowserAction();
     await frame.locator("body").press("End");
     execution?.recordDomInspection();
-    const addSectionButtons = page.getByRole("button", {
-      name: "Add Section",
-      exact: true,
-    });
-    const addSectionCount = await this.inspectCount(addSectionButtons, execution);
-    if (addSectionCount < 1 || !(await addSectionButtons.last().isVisible())) {
-      throw this.editorError("The Home editor did not expose an Add Section control.");
-    }
-    await this.clickOne(addSectionButtons.last(), "Add Section", execution);
+    const addSectionButton = await this.resolveVisibleEnabledControl(
+      page,
+      ADD_SECTION_CONTROL_SELECTORS,
+      "Add Section",
+      execution,
+    );
+    await this.clickOne(addSectionButton, "Add Section", execution);
     const sectionDialog = page.getByRole("dialog", { name: "Add a Section", exact: true });
     await this.waitForLocator(sectionDialog, { state: "visible", timeout: this.timeoutMs }, execution);
     const addBlank = sectionDialog.getByText("Add Blank", { exact: true });
@@ -288,11 +311,13 @@ export class SquarespaceContentService {
     }
     execution?.beforeBrowserAction();
     await newSection.hover();
-    await this.clickOne(
-      page.getByRole("button", { name: "Add Block", exact: true }),
+    const addBlockButton = await this.resolveVisibleEnabledControl(
+      page,
+      ADD_BLOCK_CONTROL_SELECTORS,
       "Add Block",
       execution,
     );
+    await this.clickOne(addBlockButton, "Add Block", execution);
     const blockSelector = page.getByRole("region", { name: "Block Selector", exact: true });
     await this.waitForLocator(blockSelector, { state: "visible", timeout: this.timeoutMs }, execution);
     await this.clickOne(
@@ -363,7 +388,7 @@ export class SquarespaceContentService {
     const lastSection = after.sections.at(-1);
     if (
       after.url !== homeUrl ||
-      after.sections.length !== initialSectionCount + 1 ||
+      after.sections.length !== backup.sections.length + 1 ||
       !lastSection?.visibleText.includes(input.text) ||
       !lastSection.blocks.some((block) => block.visibleText.trim() === input.text)
     ) {
@@ -417,7 +442,7 @@ export class SquarespaceContentService {
   ): string {
     if (
       page.id !== expectedPageId ||
-      page.name !== "Home" ||
+      page.name.toLowerCase() !== "home" ||
       page.type !== "page" ||
       !page.url
     ) {
@@ -478,13 +503,12 @@ export class SquarespaceContentService {
   }
 
   private async assertPublishedHomePreview(page: Page): Promise<void> {
-    const homeLabel = page.getByText("Home", { exact: true });
-    const publishedLabel = page.getByText("Page · Published", { exact: true });
-    if (
-      (await homeLabel.count()) === 0 ||
-      (await publishedLabel.count()) !== 1 ||
-      !(await publishedLabel.isVisible())
-    ) {
+    const homePreviewLabel = page.getByText("Home", { exact: true }).first();
+    const publishedPreview = page.getByText(/Page\s*.?\s*Published/).first();
+    try {
+      await homePreviewLabel.waitFor({ state: "visible", timeout: this.timeoutMs });
+      await publishedPreview.waitFor({ state: "visible", timeout: this.timeoutMs });
+    } catch {
       throw this.editorError(
         "The editor did not identify a published Home page; no page content was changed.",
       );
@@ -495,34 +519,60 @@ export class SquarespaceContentService {
     page: Page,
     execution?: BrowserExecutionContext,
   ): Promise<void> {
-    await this.waitForLocator(
-      page.getByRole("button", { name: "Save", exact: true }),
-      { state: "visible", timeout: this.timeoutMs },
-      execution,
-    );
-    await this.waitForLocator(
-      page.getByRole("button", { name: "Exit", exact: true }),
-      { state: "visible", timeout: this.timeoutMs },
-      execution,
-    );
+    await this.resolveVisibleEnabledControl(page, SAVE_CONTROL_SELECTORS, "Save", execution);
+    await this.resolveVisibleEnabledControl(page, EXIT_CONTROL_SELECTORS, "Exit", execution);
     execution?.recordDomInspection();
     await this.assertPublishedHomePreview(page);
   }
 
   private async findHomeFrame(page: Page, homeUrl: string): Promise<Frame> {
     const target = new URL(homeUrl);
+    const siteFrameElement = page.locator(SITE_FRAME_SELECTOR).first();
+    if ((await this.inspectCount(siteFrameElement)) > 0) {
+      const siteFrame = await siteFrameElement.elementHandle();
+      const contentFrame = siteFrame ? await siteFrame.contentFrame() : null;
+      if (contentFrame) {
+        const frameUrl = new URL(contentFrame.url());
+        if (frameUrl.origin === target.origin) {
+          const sectionCount = await contentFrame.locator(SECTION_SELECTOR).count();
+          if (sectionCount > 0) {
+            return contentFrame;
+          }
+        }
+      }
+    }
+
     const frame = page.frames().find((candidate) => {
       try {
         const url = new URL(candidate.url());
-        return url.origin === target.origin && url.pathname === "/";
+        return url.origin === target.origin && (url.pathname === "/" || url.pathname === "");
       } catch {
         return false;
       }
     });
-    if (!frame) {
+    if (!frame || (await frame.locator(SECTION_SELECTOR).count()) === 0) {
       throw this.editorError("The Home page editor frame could not be verified.");
     }
     return frame;
+  }
+
+  private async resolveVisibleEnabledControl(
+    page: Page,
+    selectors: string[],
+    controlName: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<Locator> {
+    for (const selector of selectors) {
+      const control = page.locator(`${selector}:visible`).first();
+      if ((await this.inspectCount(control, execution)) !== 1) {
+        continue;
+      }
+      if (await control.isDisabled()) {
+        continue;
+      }
+      return control;
+    }
+    throw this.editorError(`The Home editor did not expose one enabled ${controlName} control.`);
   }
 
   private async applyBlackTextColor(
@@ -555,7 +605,12 @@ export class SquarespaceContentService {
     page: Page,
     execution?: BrowserExecutionContext,
   ): Promise<void> {
-    const settings = page.locator('button[aria-label="Open Section Settings"]:visible');
+    const settings = await this.resolveVisibleEnabledControl(
+      page,
+      SECTION_SETTINGS_CONTROL_SELECTORS,
+      "Open Section Settings",
+      execution,
+    );
     await this.clickOne(settings, "Open Section Settings", execution);
     await this.waitForLocator(
       page.getByRole("dialog", { name: "Section editor form", exact: true }),

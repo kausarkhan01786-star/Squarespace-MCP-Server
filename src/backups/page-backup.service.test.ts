@@ -27,6 +27,14 @@ const pageRecord: SquarespacePage = {
   url: "https://fixture.squarespace.com/services?session_token=private#account",
   visibilityStatus: "enabled",
   enabled: true,
+  identity: {
+    kind: "synthetic",
+    native_id: null,
+    synthetic_id: "fixture-page",
+    title: "Services",
+    slug: "services",
+    is_homepage: false,
+  },
 };
 const sections: PageSection[] = [
   {

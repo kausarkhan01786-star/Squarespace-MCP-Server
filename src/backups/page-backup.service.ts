@@ -30,6 +30,14 @@ const pageInspectionSchema = z.object({
   url: z.string().nullable(),
   visibilityStatus: z.enum(["enabled", "disabled", "unknown"]),
   enabled: z.boolean().nullable(),
+  identity: z.object({
+    kind: z.enum(["native", "synthetic"]),
+    native_id: z.string().nullable(),
+    synthetic_id: z.string().nullable(),
+    title: z.string(),
+    slug: z.string().nullable(),
+    is_homepage: z.boolean(),
+  }).optional(),
 });
 const pageSectionSchema = z.object({
   id: z.string().nullable(),

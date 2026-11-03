@@ -36,6 +36,17 @@ export type SquarespacePageCreationType = "page" | "blog";
 export type PageCreationGroup = Exclude<NavigationGroup, "other">;
 export type PageVisibilityStatus = "enabled" | "disabled" | "unknown";
 
+export type SquarespacePageIdentityKind = "native" | "synthetic";
+
+export interface SquarespacePageIdentity {
+  kind: SquarespacePageIdentityKind;
+  native_id: string | null;
+  synthetic_id: string | null;
+  title: string;
+  slug: string | null;
+  is_homepage: boolean;
+}
+
 export interface SquarespacePage {
   id: string;
   websiteId: string;
@@ -49,6 +60,7 @@ export interface SquarespacePage {
   url: string | null;
   visibilityStatus: PageVisibilityStatus;
   enabled: boolean | null;
+  identity: SquarespacePageIdentity;
 }
 
 export interface PageNavigationNode extends SquarespacePage {
@@ -2281,10 +2293,15 @@ export function createPageRecords(
     const group = toNavigationGroup(item.groupLabel);
     const pathKey = `${group}|${parentPath.join("/")}`;
     const hash = createHash("sha256").update(`${websiteId}|${pathKey}`).digest("hex").slice(0, 16);
-    let id = hash;
+    let id = `syn:v1:${hash}`;
     let suffix = 2;
     while (usedIds.has(id)) {
-      id = `${hash}-${suffix}`;
+      const slugKey = item.slug?.trim().toLowerCase() || "(no-slug)";
+      const disambiguator = createHash("sha256")
+        .update(`${websiteId}|${pathKey}|${slugKey}|${item.type}|${suffix}`)
+        .digest("hex")
+        .slice(0, 8);
+      id = `syn:v1:${hash}-${disambiguator}`;
       suffix += 1;
     }
     usedIds.add(id);
@@ -2298,11 +2315,7 @@ export function createPageRecords(
       : "page";
     const slug = item.slug?.trim();
     let url: string | null = null;
-    const isHomePage =
-      item.isHomePage ||
-      (item.name.toLowerCase() === "home" &&
-        item.groupLabel.trim().toLowerCase() === "main navigation" &&
-        item.parentIndex === null);
+    const isHomePage = item.isHomePage;
     if (isHomePage) {
       url = `${origin}/`;
     } else if (slug !== undefined && slug.length > 0) {
@@ -2320,11 +2333,13 @@ export function createPageRecords(
         "A page record could not be assigned a stable ID.",
       );
     }
+    const title = item.pageTitle?.trim() || item.name;
+    const navigationTitle = item.navigationTitle?.trim() || item.name;
     return {
       id,
       websiteId,
-      name: item.pageTitle?.trim() || item.name,
-      navigationTitle: item.navigationTitle?.trim() || item.name,
+      name: title,
+      navigationTitle,
       type: pageType,
       group: toNavigationGroup(item.groupLabel),
       groupLabel: item.groupLabel.trim(),
@@ -2333,6 +2348,14 @@ export function createPageRecords(
       url,
       visibilityStatus: enabled === null ? "unknown" : enabled ? "enabled" : "disabled",
       enabled,
+      identity: {
+        kind: "synthetic",
+        native_id: null,
+        synthetic_id: id,
+        title,
+        slug: slug && slug.length > 0 ? slug : isHomePage ? "home" : null,
+        is_homepage: isHomePage,
+      },
     };
   });
 }

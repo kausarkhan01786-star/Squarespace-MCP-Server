@@ -143,8 +143,11 @@ The server registers these website, page, and content tools:
 
 - `list_websites` — list sites available in the manually authenticated account.
 - `list_pages` — return page IDs, names, page/folder types, URLs, navigation
-  groups, parent folders, and enabled status; optionally filter by group.
-- `get_page_details` — read one page's settings and navigation metadata.
+  groups, parent folders, enabled status, and identity metadata
+  (`kind`, `native_id`, `synthetic_id`, `title`, `slug`, `is_homepage`);
+  optionally filter by group.
+- `get_page_details` — read one page's settings, navigation metadata, and
+  identity metadata.
 - `get_page_url` — return one page's internal URL.
 - `get_navigation_structure` — return nested Main Navigation, Footer
   Navigation, Not Linked, and other groups.

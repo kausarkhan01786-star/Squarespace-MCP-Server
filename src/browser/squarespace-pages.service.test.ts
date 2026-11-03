@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
 import {
+  createPageRecords,
   SquarespacePagesService,
 } from "./squarespace-pages.service.js";
 import type { WebsiteSummary } from "./squarespace-browser.service.js";
@@ -372,6 +373,76 @@ const editorHtml = (confirmSave: boolean, publishDialog = false) => `<!doctype h
   </script>
 </body></html>`;
 
+test("creates synthetic identity metadata for pages with duplicate titles and different slugs", () => {
+  const records = createPageRecords(
+    "fixture-site",
+    "https://fixture.squarespace.com/config",
+    [
+      {
+        index: 0,
+        name: "home",
+        groupLabel: "Main Navigation",
+        type: "page",
+        parentIndex: null,
+        depth: 1,
+        isHomePage: false,
+        pageTitle: "home",
+        navigationTitle: "home",
+        slug: "home-1",
+        enabled: true,
+        isFolder: false,
+      },
+      {
+        index: 1,
+        name: "Home",
+        groupLabel: "Main Navigation",
+        type: "page",
+        parentIndex: null,
+        depth: 1,
+        isHomePage: true,
+        pageTitle: "Home",
+        navigationTitle: "Home",
+        slug: "home",
+        enabled: true,
+        isFolder: false,
+      },
+    ],
+  );
+
+  assert.equal(records.length, 2);
+  assert.notEqual(records[0]?.id, records[1]?.id);
+  assert.equal(records[0]?.identity.kind, "synthetic");
+  assert.equal(records[0]?.identity.native_id, null);
+  assert.equal(records[0]?.identity.synthetic_id, records[0]?.id);
+  assert.equal(records[0]?.identity.title, "home");
+  assert.equal(records[0]?.identity.slug, "home-1");
+  assert.equal(records[0]?.identity.is_homepage, false);
+  assert.equal(records[1]?.identity.kind, "synthetic");
+  assert.equal(records[1]?.identity.slug, "home");
+  assert.equal(records[1]?.identity.is_homepage, true);
+  assert.match(records[0]?.id ?? "", /^syn:v1:/);
+  assert.match(records[1]?.id ?? "", /^syn:v1:/);
+});
+
+test("requires exact page IDs and never falls back to title or slug", async () => {
+  const { browser, pages } = await createFixture();
+  try {
+    const records = await pages.listPages(website.id);
+    const home = records.find((record) => record.name === "Home");
+    assert.ok(home);
+    await assert.rejects(() => pages.getPageDetails(website.id, "home"), {
+      code: "PAGE_NOT_FOUND",
+    });
+    await assert.rejects(() => pages.getPageDetails(website.id, "home-1"), {
+      code: "PAGE_NOT_FOUND",
+    });
+    const byId = await pages.getPageDetails(website.id, home.id);
+    assert.equal(byId.id, home.id);
+  } finally {
+    await browser.close();
+  }
+});
+
 test("reads and categorizes nested page records without leaving folder UI expanded", async () => {
   const { browser, page, pages } = await createFixture();
   try {
@@ -401,6 +472,11 @@ test("reads and categorizes nested page records without leaving folder UI expand
 
     const home = records.find((record) => record.name === "Home");
     assert.ok(home);
+    assert.equal(home.identity.kind, "synthetic");
+    assert.equal(home.identity.native_id, null);
+    assert.equal(home.identity.synthetic_id, home.id);
+    assert.equal(home.identity.is_homepage, true);
+    assert.equal(home.identity.slug, "home");
     assert.deepEqual(await pages.getPageUrl(website.id, home.id), {
       websiteId: website.id,
       pageId: home.id,

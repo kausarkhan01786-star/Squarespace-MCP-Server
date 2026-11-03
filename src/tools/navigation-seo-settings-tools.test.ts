@@ -220,6 +220,14 @@ test("inspects navigation sibling order and parent hierarchy from the Pages pane
     url: null,
     visibilityStatus: "unknown",
     enabled: null,
+    identity: {
+      kind: "synthetic",
+      native_id: null,
+      synthetic_id: "folder-1",
+      title: "Projects",
+      slug: null,
+      is_homepage: false,
+    },
   };
   const child: SquarespacePage = {
     id: "page-2",
@@ -234,6 +242,14 @@ test("inspects navigation sibling order and parent hierarchy from the Pages pane
     url: "https://fixture.squarespace.com/second",
     visibilityStatus: "enabled",
     enabled: true,
+    identity: {
+      kind: "synthetic",
+      native_id: null,
+      synthetic_id: "page-2",
+      title: "Second",
+      slug: "second",
+      is_homepage: false,
+    },
   };
   const tree: PageNavigationNode = { ...parent, children: [{ ...child, children: [] }] };
   const website: WebsiteSummary = {
