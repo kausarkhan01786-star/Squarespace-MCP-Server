@@ -854,3 +854,5 @@ Strict TypeScript checks are enabled in `tsconfig.json`. The page/design tools u
 use the official APIs documented at
 [Squarespace Commerce APIs](https://developers.squarespace.com/commerce-apis/overview)
 and do not make live changes.
+
+[![M8ven Score](https://m8ven.ai/badge/mcp/kausarkhan01786-star-squarespace-mcp-server-17jvvv?v=41a1cb6798a27688bd09d6543b7cfb7b)](https://m8ven.ai/mcp/kausarkhan01786-star-squarespace-mcp-server-17jvvv?s=readme)
