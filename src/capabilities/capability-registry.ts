@@ -203,6 +203,17 @@ export class CapabilityRegistry {
     return definition ? this.mergeBinding(cms, definition) : undefined;
   }
 
+  hasExplicitBinding(cms: CmsId, capabilityId: string): boolean {
+    return this.bindings.has(this.key(cms, capabilityId));
+  }
+
+  isOperationDefined(
+    capabilityId: string,
+    operation: CapabilityOperation,
+  ): boolean {
+    return this.definitions.get(capabilityId)?.operations.includes(operation) ?? false;
+  }
+
   getOperationStatus(
     cms: CmsId,
     capabilityId: string,

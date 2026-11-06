@@ -34,6 +34,11 @@ export type RecoveryStrategy =
   | "provider_rollback"
   | "manual_recovery";
 
+export type CapabilityPermissionRequirement =
+  | { readonly kind: "required"; readonly permissions: readonly string[] }
+  | { readonly kind: "permissionless" }
+  | { readonly kind: "unknown" };
+
 export interface CapabilityDefinition {
   readonly id: string;
   readonly category: string;
@@ -46,6 +51,7 @@ export interface CapabilityOperationBinding {
   readonly toolNames: readonly string[];
   readonly mechanism: ExecutionMechanism;
   readonly permissions: readonly string[];
+  readonly permissionRequirement?: CapabilityPermissionRequirement;
   readonly humanApproval: HumanApprovalRequirement;
   readonly verificationRequirements: readonly string[];
   readonly recoveryStrategy: RecoveryStrategy;

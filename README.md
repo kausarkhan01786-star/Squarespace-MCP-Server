@@ -1,8 +1,25 @@
-# Squarespace MCP Server
 
-A Node.js and TypeScript Squarespace MCP server with a persistent Playwright
-browser service, website/page inspection tools, one guarded Home-page content
-mutation, and read-only Squarespace Commerce API inspection tools.
+# Universal CMS AI Agent
+
+One AI Agent. Multiple CMS Platforms. Complete Website Building.
+
+An AI-powered, multi-CMS website automation platform designed to analyze website references, plan designs, build and edit CMS content, and perform responsive visual QA.
+
+> **Previously known as: Squarespace MCP Server**
+
+---
+
+## Project Vision
+
+**Universal CMS AI Agent** is built to provide seamless automation across multiple CMS platforms. The platform is architected for extensibility, with the long-term goal of supporting Squarespace, WordPress, Wix, and other major website builders in a unified workflow. **Currently, Squarespace is the first and only fully implemented integration.** WordPress and Wix adapters are planned, but not yet developed or available.
+
+---
+
+## Squarespace Integration (Current State)
+
+All core features currently target Squarespace via the MCP server architecture. Squarespace tools, browser automation, and Commerce API adapters comprise the implemented capabilities. Comprehensive logic for WordPress, Wix, and other CMS platforms **is not provided** in this release.
+
+---
 
 ## Requirements
 
@@ -71,33 +88,19 @@ Capabilities that a provider does not implement return an explicit
 
 ## Configuration and credentials
 
-Copy `.env.example` to `.env` and set only the values needed for your
-installation. The example contains no credentials. Keep `.env` out of version
-control, use a secret manager in deployed environments, and never pass
-Squarespace passwords or API keys in tool arguments or logs.
 
-Browser authentication is manual; the service never requests or stores
-passwords or OTPs. Browser automation should only be used for workflows that
-are not available through officially supported APIs and must respect
-Squarespace's terms and applicable access controls.
+Copy `.env.example` to `.env` and set only the values needed for your installation. The example contains no credentials. 
+Keep `.env` out of version control, use a secret manager in deployed environments, and never pass Squarespace passwords or API keys in tool arguments or logs.
 
-## Browser service
+Browser authentication is manual; the service never requests or stores passwords or OTPs. 
+Browser automation should only be used for workflows not available through officially supported APIs and must respect Squarespace's terms and applicable access controls.
 
-The browser service launches visible Chromium and keeps its login session in a
-local persistent profile. The default profile is under the current user's OS
-data directory. Optionally set `SQUARESPACE_BROWSER_PROFILE_DIR` in the process
-environment to an absolute directory outside the project. The `.env.example` file is a
-template; this scaffold does not load `.env` files automatically, so set
-environment variables in your shell or hosting environment. Treat the profile
-and screenshots as sensitive: they can contain authenticated website data.
 
-Commerce tools use Squarespace's official API, separately from browser
-authentication. Configure `SQUARESPACE_API_KEY` and `SQUARESPACE_SITE_ID` in
-the MCP server process environment. The API key must have only the read-only
-Products, Inventory, Orders, and Discounts permissions needed for the tools
-you use. `SQUARESPACE_SITE_ID` is the `siteId` returned by
-`GET /1.0/authorization/website` for that key. Each commerce request verifies
-that API identity and URL against the selected website from `list_websites`;
+## Browser Service
+
+The browser service launches visible Chromium and keeps its login session in a local persistent profile. The default profile is under the current user's OS data directory. Optionally set `SQUARESPACE_BROWSER_PROFILE_DIR` in the process environment to an absolute directory outside the project. The `.env.example` file is a template; this scaffold does not load `.env` files automatically, so set environment variables in your shell or hosting environment. Treat the profile and screenshots as sensitive: they can contain authenticated website data.
+
+Commerce tools use Squarespace's official API, separately from browser authentication. Configure `SQUARESPACE_API_KEY` and `SQUARESPACE_SITE_ID` in the MCP server process environment. The API key must have only the read-only Products, Inventory, Orders, and Discounts permissions needed for the tools you use. `SQUARESPACE_SITE_ID` is the `siteId` returned by `GET /1.0/authorization/website` for that key. Each commerce request verifies that API identity and URL against the selected website from `list_websites`;
 the API key is never accepted as a tool argument or written to logs. Tool calls
 fail explicitly when credentials, read permissions, or site identity do not
 match.
