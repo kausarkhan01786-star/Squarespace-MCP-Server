@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   assertAllowedSquarespaceUrl,
@@ -40,5 +43,21 @@ test("rejects project-local browser profiles", () => {
   assert.equal(
     resolveProfileDirectory("C:\\Users\\user\\AppData\\Local\\squarespace-profile", "C:\\workspace\\project"),
     "C:\\Users\\user\\AppData\\Local\\squarespace-profile",
+  );
+});
+
+test("resolves one explicit absolute profile path identically from different working directories", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "squarespace-profile-path-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const profile = join(root, "user-data", "chromium-profile");
+  const firstWorkingDirectory = join(root, "workspace-one");
+  const secondWorkingDirectory = join(root, "workspace-two");
+  assert.equal(
+    resolveProfileDirectory(profile, firstWorkingDirectory),
+    resolveProfileDirectory(profile, secondWorkingDirectory),
+  );
+  assert.equal(
+    resolveProfileDirectory(undefined, firstWorkingDirectory),
+    resolveProfileDirectory(undefined, secondWorkingDirectory),
   );
 });

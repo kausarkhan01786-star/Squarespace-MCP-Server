@@ -852,7 +852,7 @@ export class SquarespaceContentService {
   private async assertPageUrl(page: Page, expectedUrl: string): Promise<void> {
     const actual = new URL(page.url());
     const expected = new URL(expectedUrl);
-    if (actual.origin !== expected.origin || actual.pathname !== expected.pathname) {
+    if (actual.origin !== expected.origin || normalizePath(actual.pathname) !== normalizePath(expected.pathname)) {
       throw new SquarespaceBrowserError(
         "TEXT_SECTION_TARGET_MISMATCH",
         "The current browser page is not on the confirmed Squarespace website.",

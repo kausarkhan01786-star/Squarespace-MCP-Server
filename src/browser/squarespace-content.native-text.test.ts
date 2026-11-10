@@ -125,10 +125,15 @@ interface MockOptions {
   baselineDrift?: boolean;
   unrelatedDriftBeforeSave?: boolean;
   failAfterInsertion?: boolean;
+  expectedPageUrl?: string;
+  currentPageUrl?: string;
 }
 
 function createOrchestrationFixture(options: MockOptions = {}) {
   const mode = options.mode ?? "create";
+  const expectedPageUrl = options.expectedPageUrl ?? "https://fixture.squarespace.com/target";
+  const expectedPage = new URL(expectedPageUrl);
+  const expectedEditorUrl = `${expectedPage.origin}${expectedPage.pathname}`;
   const state = { inserted: false, editorOpen: false, text: "Old copy", fills: 0, addClicks: 0, writeClicks: 0, saveCalls: 0, inspectCalls: 0, openedUrl: "" };
   const original = mode === "edit"
     ? [{ id: "block-1", type: "text", definitionName: "Text", visibleText: "Old copy", textTruncated: false }]
@@ -206,9 +211,9 @@ function createOrchestrationFixture(options: MockOptions = {}) {
     },
   });
   const section = locator("section");
-  frame = { url: () => options.pageMismatch ? "https://fixture.squarespace.com/other" : "https://fixture.squarespace.com/target", locator: (selector: string) => selector === '[data-test="page-section"]' ? locator("page-sections") : section.locator(selector) };
+  frame = { url: () => options.pageMismatch ? "https://fixture.squarespace.com/other" : expectedEditorUrl, locator: (selector: string) => selector === '[data-test="page-section"]' ? locator("page-sections") : section.locator(selector) };
   page = {
-    url: () => "https://fixture.squarespace.com/target",
+    url: () => options.currentPageUrl ?? expectedEditorUrl,
     frames: () => [frame],
     locator: (selector: string) => selector.includes("sqs-site-frame") ? locator("none", 0) : locator(selector.includes("Add Block") ? "add" : "other", selector.includes("Add Block") ? options.addCount ?? 1 : 1),
     getByRole: (role: string, args: { name: string }) => {
@@ -222,7 +227,7 @@ function createOrchestrationFixture(options: MockOptions = {}) {
   const pageDetails = {
     id: "page-1", websiteId: website.id, name: "Target", navigationTitle: "Target", type: "page" as const,
     group: "main_navigation" as const, groupLabel: "Main Navigation", parentId: null, parentPath: [],
-    url: "https://fixture.squarespace.com/target", visibilityStatus: "enabled" as const, enabled: true,
+    url: expectedPageUrl, visibilityStatus: "enabled" as const, enabled: true,
     identity: { kind: "native" as const, native_id: "page-1", synthetic_id: null, title: "Target", slug: "target", is_homepage: false },
   };
   const guard = new MutationApprovalGuard({ requestApproval: async () => true });
@@ -242,7 +247,7 @@ function createOrchestrationFixture(options: MockOptions = {}) {
       return {
         websiteId: website.id,
         pageId: options.pageMismatch ? "wrong-page" : "page-1",
-        url: "https://fixture.squarespace.com/target",
+        url: expectedPageUrl,
         sectionsTruncated: false,
         sections: [{ id: options.wrongSection ? "wrong-section" : "section-1", theme: null, layout: "unknown" as const,
           headings: [], visibleText: records.map((record) => record.visibleText).join(" "), textTruncated: false,
@@ -288,6 +293,48 @@ test("native Text Block edit executes once against its exact block", async () =>
   assert.equal(fixture.state.addClicks, 0);
   assert.equal(fixture.state.fills, 1);
   assert.equal(fixture.state.saveCalls, 1);
+});
+
+test("current page URL matching accepts only a trailing-slash difference for the same page", async (t) => {
+  for (const [expectedPageUrl, currentPageUrl] of [
+    ["https://fixture.squarespace.com/projects", "https://fixture.squarespace.com/projects/"],
+    ["https://fixture.squarespace.com/projects/", "https://fixture.squarespace.com/projects"],
+  ]) {
+    await t.test(`${new URL(expectedPageUrl).pathname} matches ${new URL(currentPageUrl).pathname}`, async () => {
+      const fixture = createOrchestrationFixture({ expectedPageUrl, currentPageUrl });
+      const result = await runAuthorizedFixture(fixture);
+      assert.equal(result.verified, true);
+      const expectedPage = new URL(expectedPageUrl);
+      assert.equal(fixture.state.openedUrl, `${expectedPage.origin}${expectedPage.pathname}`);
+    });
+  }
+});
+
+test("current page URL matching ignores query strings but keeps the path identity", async () => {
+  const fixture = createOrchestrationFixture({
+    expectedPageUrl: "https://fixture.squarespace.com/projects?source=panel",
+    currentPageUrl: "https://fixture.squarespace.com/projects/?mode=edit",
+  });
+  const result = await runAuthorizedFixture(fixture);
+  assert.equal(result.verified, true);
+  assert.equal(fixture.state.openedUrl, "https://fixture.squarespace.com/projects");
+});
+
+test("current page URL matching rejects another path, another origin, and homepage/non-homepage mismatches", async (t) => {
+  for (const [expectedPageUrl, currentPageUrl] of [
+    ["https://fixture.squarespace.com/projects", "https://fixture.squarespace.com/other"],
+    ["https://fixture.squarespace.com/projects", "https://other.squarespace.com/projects"],
+    ["https://fixture.squarespace.com/projects", "https://fixture.squarespace.com/"],
+    ["https://fixture.squarespace.com/", "https://fixture.squarespace.com/projects"],
+  ]) {
+    await t.test(`${expectedPageUrl} does not match ${currentPageUrl}`, async () => {
+      const fixture = createOrchestrationFixture({ expectedPageUrl, currentPageUrl });
+      await assert.rejects(runAuthorizedFixture(fixture), { code: "TEXT_SECTION_TARGET_MISMATCH" });
+      assert.equal(fixture.state.addClicks, 0);
+      assert.equal(fixture.state.fills, 0);
+      assert.equal(fixture.state.saveCalls, 0);
+    });
+  }
 });
 
 test("missing and multiple Add Block controls fail closed before insertion", async (t) => {
