@@ -105,6 +105,12 @@ const IMPLEMENTED_TOOLS: Partial<Record<WorkflowAction, {
     approvalRequired: true,
     retrySafe: false,
   },
+  create_page: {
+    toolName: "create_page",
+    readOnly: false,
+    approvalRequired: true,
+    retrySafe: false,
+  },
 };
 
 const COMMERCE_TOOLS: Partial<Record<WorkflowAction, string>> = {
@@ -124,6 +130,7 @@ const BROWSER_ACTIONS = new Set<WorkflowAction>([
   "inspect_design",
   "backup_page",
   "add_text_section",
+  "create_page",
 ]);
 
 export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
@@ -148,9 +155,7 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
           action,
           supported: true,
           ...implementation,
-          limitation: action === "add_text_section"
-            ? "Only the verified Kausar Mia Home-page workflow (pure white section and pure black text) is implemented; explicit task approval is mandatory."
-            : null,
+          limitation: null,
         };
       }
       const commerceTool = COMMERCE_TOOLS[action];
@@ -305,6 +310,15 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
           args.limit ?? 50,
           execution?.browser,
         );
+      case "create_page": {
+        const title = (args.text ?? args.page_id ?? "New Page").trim();
+        return this.services.pages.createPage(
+          website.id,
+          title,
+          "page",
+          "main_navigation",
+        );
+      }
       case "add_text_section":
         if (!args.text) {
           throw new SquarespaceBrowserError(
@@ -316,8 +330,8 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
           website_id: website.id,
           page_id: required(pageId, action),
           text: args.text,
-          background_color: "#FFFFFF",
-          text_color: "#000000",
+          background_color: args.background_color ?? "#FFFFFF",
+          text_color: args.text_color ?? "#000000",
           confirm_potentially_live_save: args.confirm_potentially_live_save,
         }, execution?.browser, execution?.mutationAuthorization);
       default:

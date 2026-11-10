@@ -315,7 +315,20 @@ export class WebsiteWorkflowService {
         websiteId: workflow.website.id,
         pageId,
         text,
+        backgroundColor: task.args.background_color,
+        textColor: task.args.text_color,
       });
+    }
+    if (task.action === "create_page") {
+      const title = (task.args.text ?? task.args.page_id ?? "New Page").trim();
+      return {
+        provider: "squarespace",
+        websiteId: workflow.website.id,
+        action: "page.create",
+        targetResource: `website:${workflow.website.id}:page-list:main_navigation`,
+        payload: { title, pageType: "page", group: "main_navigation" },
+        permissionScopes: ["page.create"],
+      };
     }
     throw new MutationApprovalError(
       "unavailable",

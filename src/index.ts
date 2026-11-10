@@ -29,6 +29,11 @@ import { MutationApprovalGuard } from "./approval/mutation-approval.js";
 import { McpHumanApprovalPrompt } from "./approval/mcp-human-approval.js";
 
 async function main(): Promise<void> {
+  try {
+    process.loadEnvFile?.();
+  } catch {
+    // .env file is optional
+  }
   const server = new McpServer({
     name: "squarespace-mcp-server",
     version: "0.1.0",
@@ -86,7 +91,7 @@ async function main(): Promise<void> {
   );
   registerSettingsExecutionTools(server, settingsExecution, browserOperationLock);
   registerWorkflowTools(server, workflow, browserOperationLock);
-  registerHeroTools(server);
+  registerHeroTools(server, browser, pages, browserOperationLock);
   transport.onclose = () => {
     void browserOperationLock.runExclusive(() => browser.close()).catch((error: unknown) => {
       logError("browser_close_failed", error);

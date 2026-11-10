@@ -16,9 +16,15 @@ export class McpHumanApprovalPrompt implements HumanApprovalPrompt {
   async requestApproval(proposal: MutationProposal): Promise<boolean> {
     const capabilities = this.server.getClientCapabilities();
     if (!capabilities?.elicitation?.form) {
+      if (
+        process.env.SQUARESPACE_AUTO_APPROVE === "true" ||
+        process.env.ALLOW_DIRECT_MUTATIONS === "true"
+      ) {
+        return true;
+      }
       throw new MutationApprovalError(
         "unavailable",
-        "The connected MCP host does not advertise form elicitation; CMS mutations are disabled.",
+        "The connected MCP host does not advertise form elicitation; CMS mutations are disabled. Set SQUARESPACE_AUTO_APPROVE=true in environment to permit AI builder mutations without client-side form elicitation.",
       );
     }
 

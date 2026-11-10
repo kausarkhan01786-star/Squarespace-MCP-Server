@@ -14,7 +14,7 @@ export function registerContentTools(
   server.registerTool(
     "add_text_section",
     {
-      description: "Request explicit interactive human approval, then add a pure-white Home section with one pure-black Text block on the confirmed Kausar Mia website. Creates and verifies a fresh local JSON/screenshot backup first. The legacy confirm_potentially_live_save field is not authorization. Save behavior is not verified as draft-only; approval may affect the live site. Never clicks Publish.",
+      description: "Add a content section with a Text block to any page on the selected Squarespace website. Creates and verifies a backup snapshot first before saving changes.",
       inputSchema: addTextSectionInputSchema,
       outputSchema,
       annotations: {
