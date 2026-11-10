@@ -100,6 +100,20 @@ Browser automation should only be used for workflows not available through offic
 
 The browser service launches visible Chromium and keeps its login session in a local persistent profile. The default profile is under the current user's OS data directory. Optionally set `SQUARESPACE_BROWSER_PROFILE_DIR` in the process environment to an absolute directory outside the project. The `.env.example` file is a template; this scaffold does not load `.env` files automatically, so set environment variables in your shell or hosting environment. Treat the profile and screenshots as sensitive: they can contain authenticated website data.
 
+Each stdio MCP process owns its own browser runtime. Do not run stdio browser ownership and the shared HTTP gateway concurrently against the same persistent profile; the profile ownership safeguard is intended to reject a second owner, not to share a browser context between processes.
+
+### Local Streamable HTTP gateway security
+
+The Streamable HTTP gateway binds only to `127.0.0.1`. Its security authority issues random bearer credentials to trusted in-process provisioning code and retains only credential hashes. The bearer value is returned once by `GatewaySecurity.provisionClient`; pass it directly to a trusted native client bootstrap and store it in an OS-protected credential store. Never put it in a URL, source file, logs, or frontend JavaScript. The current authority is in-memory, so a gateway restart requires secure reprovisioning. Native clients may omit `Origin`; any supplied Origin must exactly match the configured allowlist. Host validation is bound to the gateway's actual loopback address and port.
+
+The gateway defaults to at most 64 active HTTP requests globally and 8 per MCP session. The shared browser-operation lock defaults to 32 queued operations; these limits can be configured when constructing the runtime and gateway. The default graceful drain is 10 seconds. If the drain deadline expires, `close()` rejects with `GatewayShutdownTimeoutError`; the listener stops accepting work, while sessions, browser context, and profile ownership remain open. Let active work settle, then call `close()` again. If it remains unresolved, keep the process and profile owner alive and have the operator identify the outstanding request before retrying shutdown. Never remove the profile lease to force shutdown.
+
+Do not expose this gateway through a frontend proxy that forwards privileged credentials to JavaScript. Put browser-facing applications behind a trusted backend that authenticates its own users and makes authorized MCP calls. Gateway authentication does not replace per-session mutation approval.
+
+### Browser profile ownership recovery
+
+The browser ownership marker fails closed and is never cleared automatically. If startup reports that a profile is owned or has an uncleared marker, first stop the owning MCP process gracefully through its supported client or service controls. Verify that the owner process and its browser process have exited and that no stdio MCP client or gateway still targets that profile. Only then may an operator remove the adjacent `.mcp-owner` sidecar directory; do not touch files inside the browser profile. If the owner cannot be identified or verified as stopped, leave the marker in place and resolve ownership before retrying.
+
 Commerce tools use Squarespace's official API, separately from browser authentication. Configure `SQUARESPACE_API_KEY` and `SQUARESPACE_SITE_ID` in the MCP server process environment. The API key must have only the read-only Products, Inventory, Orders, and Discounts permissions needed for the tools you use. `SQUARESPACE_SITE_ID` is the `siteId` returned by `GET /1.0/authorization/website` for that key. Each commerce request verifies that API identity and URL against the selected website from `list_websites`;
 the API key is never accepted as a tool argument or written to logs. Tool calls
 fail explicitly when credentials, read permissions, or site identity do not

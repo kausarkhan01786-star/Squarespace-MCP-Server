@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CommerceProvider } from "../commerce/commerce-provider.js";
 import { SquarespaceCommerceService } from "../commerce/squarespace-commerce.service.js";
 import { registerCommerceTools } from "./commerce-tools.js";
+import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 
 test("registers only read-only commerce tools with strict target and pagination inputs", async () => {
   const provider: CommerceProvider = {
@@ -39,7 +40,7 @@ test("registers only read-only commerce tools with strict target and pagination 
   const server = new McpServer({ name: "commerce-tools-test", version: "1.0.0" });
   const client = new Client({ name: "commerce-tools-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  registerCommerceTools(server, commerce);
+  registerCommerceTools(server, commerce, new BrowserOperationLock());
   try {
     await server.connect(serverTransport);
     await client.connect(clientTransport);

@@ -36,14 +36,57 @@ export class BrowserOperationLockTimeoutError extends SquarespaceBrowserError {
   }
 }
 
+export class BrowserOperationQueueFullError extends SquarespaceBrowserError {
+  constructor(maxWaiters: number) {
+    super(
+      "BROWSER_OPERATION_QUEUE_FULL",
+      `The shared browser operation queue is full (maximum ${maxWaiters} waiting operations). Retry after an operation completes.`,
+    );
+  }
+}
+
 export class BrowserOperationLock {
   private locked = false;
   private readonly waiters: Waiter[] = [];
+  private readonly idleListeners = new Set<() => void>();
 
-  constructor(private readonly acquireTimeoutMs = DEFAULT_ACQUIRE_TIMEOUT_MS) {
+  constructor(
+    private readonly acquireTimeoutMs = DEFAULT_ACQUIRE_TIMEOUT_MS,
+    readonly maxWaiters = 32,
+  ) {
     if (!Number.isSafeInteger(acquireTimeoutMs) || acquireTimeoutMs <= 0) {
       throw new RangeError("acquireTimeoutMs must be a positive safe integer.");
     }
+    if (!Number.isSafeInteger(maxWaiters) || maxWaiters < 0) {
+      throw new RangeError("maxWaiters must be a non-negative safe integer.");
+    }
+  }
+
+  get isIdle(): boolean {
+    return !this.locked && this.waiters.length === 0;
+  }
+
+  async waitForIdle(timeoutMs: number): Promise<boolean> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) {
+      throw new RangeError("timeoutMs must be a non-negative safe integer.");
+    }
+    if (this.isIdle) return true;
+    if (timeoutMs === 0) return false;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (idle: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.idleListeners.delete(onIdle);
+        resolve(idle);
+      };
+      const onIdle = () => finish(true);
+      const timer = setTimeout(() => finish(this.isIdle), timeoutMs);
+      timer.unref();
+      this.idleListeners.add(onIdle);
+      if (this.isIdle) finish(true);
+    });
   }
 
   async runExclusive<T>(
@@ -124,6 +167,9 @@ export class BrowserOperationLock {
       this.locked = true;
       return Promise.resolve(this.createRelease());
     }
+    if (this.waiters.length >= this.maxWaiters) {
+      return Promise.reject(new BrowserOperationQueueFullError(this.maxWaiters));
+    }
 
     return new Promise<() => void>((resolve, reject) => {
       const waiter: Waiter = {
@@ -179,6 +225,9 @@ export class BrowserOperationLock {
       }
 
       this.locked = false;
+      const idleListeners = [...this.idleListeners];
+      this.idleListeners.clear();
+      for (const listener of idleListeners) listener();
     };
   }
 }

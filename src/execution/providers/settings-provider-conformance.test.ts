@@ -1139,6 +1139,10 @@ test("synthetic adapter is not a production CMS provider", async () => {
 
 test("production remains isolated from synthetic settings mutation", () => {
   const productionEntry = readFileSync(new URL("../../index.ts", import.meta.url), "utf8");
+  const productionSession = readFileSync(
+    new URL("../../runtime/mcp-client-session.ts", import.meta.url),
+    "utf8",
+  );
   const executionTools = readFileSync(
     new URL("../../tools/settings-execution-tools.ts", import.meta.url),
     "utf8",
@@ -1147,7 +1151,7 @@ test("production remains isolated from synthetic settings mutation", () => {
     new URL("../../planning/settings-change-planner.ts", import.meta.url),
     "utf8",
   );
-  assert.match(productionEntry, /providers:\s*new Map\(\)/);
+  assert.match(productionSession, /providers:\s*new Map\(\)/);
   assert.doesNotMatch(productionEntry, /SyntheticSettingsProvider/);
   assert.match(executionTools, /"get_settings_execution_status"/);
   assert.doesNotMatch(executionTools, /"execute_approved_settings_change"/);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BrowserOperationLock,
+  BrowserOperationQueueFullError,
   BrowserOperationLockTimeoutError,
 } from "./browser-operation-lock.js";
 import { ExecutionStoppedError } from "./browser-execution-context.js";
@@ -172,4 +173,41 @@ test("reports active cancellation promptly but retains the lock until the browse
   settleOperation.resolve();
   await next;
   assert.equal(nextStarted, true);
+});
+
+test("bounds queued browser operations and reports immediate admission failure", async () => {
+  const lock = new BrowserOperationLock(1_000, 1);
+  const started = deferred();
+  const release = deferred();
+  const first = lock.runExclusive(async () => {
+    started.resolve();
+    await release.promise;
+  });
+  await started.promise;
+  const queued = lock.runExclusive(() => "queued");
+  await assert.rejects(
+    lock.runExclusive(() => "must not enter the queue"),
+    (error: unknown) => error instanceof BrowserOperationQueueFullError &&
+      error.code === "BROWSER_OPERATION_QUEUE_FULL",
+  );
+  release.resolve();
+  await first;
+  assert.equal(await queued, "queued");
+  assert.equal(lock.isIdle, true);
+});
+
+test("waitForIdle reports timeout without releasing an active operation", async () => {
+  const lock = new BrowserOperationLock();
+  const started = deferred();
+  const release = deferred();
+  const active = lock.runExclusive(async () => {
+    started.resolve();
+    await release.promise;
+  });
+  await started.promise;
+  assert.equal(await lock.waitForIdle(5), false);
+  assert.equal(lock.isIdle, false);
+  release.resolve();
+  await active;
+  assert.equal(await lock.waitForIdle(5), true);
 });
