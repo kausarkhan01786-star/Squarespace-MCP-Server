@@ -47,6 +47,13 @@ export interface SquarespacePageIdentity {
   is_homepage: boolean;
 }
 
+export interface SquarespacePageUrlEvidence {
+  source: "pages_panel_href" | "page_settings_slug" | "homepage_marker" | null;
+  status: "resolved" | "missing" | "ambiguous" | "rejected";
+  observedHrefs: string[];
+  settingsSlug: string | null;
+}
+
 export interface SquarespacePage {
   id: string;
   websiteId: string;
@@ -57,7 +64,17 @@ export interface SquarespacePage {
   groupLabel: string;
   parentId: string | null;
   parentPath: string[];
+  panelIdentity: {
+    index: number;
+    rowDomId: string | null;
+    observedLinks: Array<{
+      href: string;
+      text: string;
+      ariaLabel: string | null;
+    }>;
+  };
   url: string | null;
+  urlEvidence: SquarespacePageUrlEvidence;
   visibilityStatus: PageVisibilityStatus;
   enabled: boolean | null;
   identity: SquarespacePageIdentity;
@@ -122,6 +139,12 @@ export interface RawPagePanelItem {
   parentIndex: number | null;
   depth: number;
   isHomePage: boolean;
+  observedLinks?: Array<{
+    href: string;
+    text: string;
+    ariaLabel: string | null;
+  }>;
+  rowDomId?: string | null;
 }
 
 interface PageSettings {
@@ -1865,6 +1888,14 @@ export class SquarespacePagesService {
             depth++;
             current = current.parentElement;
           }
+          const observedLinks = Array.from(item.querySelectorAll('a[href]'))
+            .filter(link => link.closest('${PAGE_ITEM_SELECTOR}') === item)
+            .map((link) => ({
+              href: link.getAttribute('href') || '',
+              text: (link.innerText || '').trim(),
+              ariaLabel: link.getAttribute('aria-label'),
+            }))
+            .filter(link => link.href.length > 0);
           return {
             index,
             name,
@@ -1872,7 +1903,9 @@ export class SquarespacePagesService {
             type: folderButton ? 'folder' : 'page',
             parentIndex: null,
             depth,
-            isHomePage
+            isHomePage,
+            rowDomId: item.getAttribute('id'),
+            observedLinks,
           };
         }).filter(item => item.name.length > 0 && item.groupLabel.length > 0);
       })()`,
@@ -2279,6 +2312,7 @@ export function createPageRecords(
   items: PageRecordInput[],
 ): SquarespacePage[] {
   const origin = new URL(websiteUrl).origin;
+  validatePageRecordInputs(items);
   const ids = new Map<number, string>();
   const paths = new Map<number, string[]>();
   const usedIds = new Set<string>();
@@ -2314,15 +2348,36 @@ export function createPageRecords(
       ? "folder"
       : "page";
     const slug = item.slug?.trim();
+    const observedHrefs = (item.observedLinks ?? []).map((link) => link.href);
     let url: string | null = null;
+    let urlEvidence: SquarespacePageUrlEvidence = {
+      source: null,
+      status: observedHrefs.length > 0 ? "rejected" : "missing",
+      observedHrefs,
+      settingsSlug: slug && slug.length > 0 ? slug : null,
+    };
     const isHomePage = item.isHomePage;
-    if (isHomePage) {
+    if (pageType === "folder") {
+      urlEvidence = { ...urlEvidence, status: "missing" };
+    } else if (isHomePage) {
       url = `${origin}/`;
-    } else if (slug !== undefined && slug.length > 0) {
-      const path = slug.startsWith("/") ? slug : `/${slug}`;
-      const resolved = new URL(path, origin);
-      if (resolved.origin === origin) {
-        url = resolved.toString();
+      urlEvidence = { ...urlEvidence, source: "homepage_marker", status: "resolved" };
+    } else {
+      const resolvedHrefs = observedHrefs
+        .map((href) => resolveObservedPageHref(href, origin))
+        .filter((candidate): candidate is string => candidate !== null);
+      if (resolvedHrefs.length === 1) {
+        url = resolvedHrefs[0]!;
+        urlEvidence = { ...urlEvidence, source: "pages_panel_href", status: "resolved" };
+      } else if (resolvedHrefs.length > 1) {
+        urlEvidence = { ...urlEvidence, status: "ambiguous" };
+      } else if (slug) {
+        url = resolvePageSettingsSlug(slug, origin);
+        urlEvidence = {
+          ...urlEvidence,
+          source: url ? "page_settings_slug" : null,
+          status: url ? "resolved" : "rejected",
+        };
       }
     }
     const enabled = item.enabled;
@@ -2345,7 +2400,13 @@ export function createPageRecords(
       groupLabel: item.groupLabel.trim(),
       parentId: item.parentIndex === null ? null : ids.get(item.parentIndex) ?? null,
       parentPath,
+      panelIdentity: {
+        index: item.index,
+        rowDomId: item.rowDomId ?? null,
+        observedLinks: (item.observedLinks ?? []).map((link) => ({ ...link })),
+      },
       url,
+      urlEvidence,
       visibilityStatus: enabled === null ? "unknown" : enabled ? "enabled" : "disabled",
       enabled,
       identity: {
@@ -2358,6 +2419,67 @@ export function createPageRecords(
       },
     };
   });
+}
+
+function resolveObservedPageHref(href: string, verifiedOrigin: string): string | null {
+  try {
+    const candidate = new URL(href, verifiedOrigin);
+    if (candidate.protocol !== "https:" || candidate.username || candidate.password ||
+      candidate.origin !== verifiedOrigin || normalizePath(candidate.pathname) === "/" ||
+      isNonPageSquarespaceRoute(candidate.pathname)) {
+      return null;
+    }
+    return candidate.toString();
+  } catch {
+    return null;
+  }
+}
+
+function resolvePageSettingsSlug(slug: string, verifiedOrigin: string): string | null {
+  try {
+    const path = slug.startsWith("/") ? slug : `/${slug}`;
+    const candidate = new URL(path, verifiedOrigin);
+    if (candidate.protocol !== "https:" || candidate.username || candidate.password ||
+      candidate.origin !== verifiedOrigin || normalizePath(candidate.pathname) === "/" ||
+      isNonPageSquarespaceRoute(candidate.pathname)) {
+      return null;
+    }
+    return candidate.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isNonPageSquarespaceRoute(pathname: string): boolean {
+  const normalized = normalizePath(pathname).toLowerCase();
+  return ["/config", "/account", "/login", "/dashboard", "/settings"]
+    .some((route) => normalized === route || normalized.startsWith(`${route}/`));
+}
+
+function validatePageRecordInputs(items: PageRecordInput[]): void {
+  const byIndex = new Map<number, PageRecordInput>();
+  const domIds = new Set<string>();
+  for (const item of items) {
+    if (!Number.isSafeInteger(item.index) || item.index < 0 || byIndex.has(item.index) ||
+      !item.name.trim() || !item.groupLabel.trim() || !Number.isSafeInteger(item.depth) || item.depth < 1) {
+      throw new SquarespaceBrowserError("PAGES_PANEL_NOT_FOUND", "The Pages panel returned an invalid or ambiguous page row identity.");
+    }
+    if (item.rowDomId) {
+      if (domIds.has(item.rowDomId)) {
+        throw new SquarespaceBrowserError("PAGES_PANEL_NOT_FOUND", "The Pages panel returned duplicate row DOM identities.");
+      }
+      domIds.add(item.rowDomId);
+    }
+    byIndex.set(item.index, item);
+  }
+  for (const item of items) {
+    if (item.parentIndex !== null) {
+      const parent = byIndex.get(item.parentIndex);
+      if (!parent || item.parentIndex >= item.index || (parent.type !== "folder" && !parent.isFolder)) {
+        throw new SquarespaceBrowserError("PAGES_PANEL_NOT_FOUND", "The Pages panel returned an invalid or ambiguous page hierarchy.");
+      }
+    }
+  }
 }
 
 export function buildNavigationTree(

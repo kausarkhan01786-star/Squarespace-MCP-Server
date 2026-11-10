@@ -52,16 +52,19 @@ const pagesPanelHtml = `<!doctype html>
           <div>
             <button aria-label="Home Page settings Home"></button>
             <button aria-label="Page settings Home"></button>
+            <a href="/">Home page link</a>
           </div>
         </div>
         <div data-test="pages-panel-item">
           <div>
             <button aria-label="Page settings Work"></button>
             <button aria-label="Expand child pages Work" aria-expanded="false"></button>
+            <a href="/work">Work folder link</a>
             <div data-fixture-children hidden>
               <div data-test="pages-panel-item">
                 <div>
                   <button aria-label="Page settings Services"></button>
+                  <a href="/services">Services page link</a>
                 </div>
               </div>
             </div>
@@ -72,7 +75,7 @@ const pagesPanelHtml = `<!doctype html>
       <section>
         <div data-test="pages-panel-group"><h2>Footer Navigation</h2></div>
         <div data-test="pages-panel-item">
-          <div><button aria-label="Page settings Footer page"></button></div>
+          <div><button aria-label="Page settings Footer page"></button><a href="/footer-page">Footer page link</a></div>
         </div>
       </section>
       <section>
@@ -81,6 +84,7 @@ const pagesPanelHtml = `<!doctype html>
           <div>
             <button aria-label="Page settings Hidden page"></button>
             <button aria-label="Delete page Hidden page" data-test="delete-item"></button>
+            <a href="/hidden-page">Hidden page link</a>
           </div>
         </div>
       </section>
@@ -424,6 +428,125 @@ test("creates synthetic identity metadata for pages with duplicate titles and di
   assert.match(records[1]?.id ?? "", /^syn:v1:/);
 });
 
+type PageRecordInputFixture = Parameters<typeof createPageRecords>[2][number];
+
+function pageRecordInput(overrides: Partial<PageRecordInputFixture> = {}): PageRecordInputFixture {
+  return {
+    index: 0,
+    name: "Candidate Page",
+    groupLabel: "Main Navigation",
+    type: "page",
+    parentIndex: null,
+    depth: 1,
+    isHomePage: false,
+    pageTitle: "Candidate Page",
+    navigationTitle: "Candidate Page",
+    slug: null,
+    enabled: true,
+    isFolder: false,
+    ...overrides,
+  };
+}
+
+test("resolves a unique internal Pages-panel href and preserves its evidence", () => {
+  const [page] = createPageRecords("fixture-site", website.url, [pageRecordInput({
+    observedLinks: [{ href: "https://fixture.squarespace.com/cultural-center", text: "Open page", ariaLabel: "Open Candidate Page" }],
+    rowDomId: "page-row-7",
+  })]);
+  assert.ok(page);
+  assert.equal(page.url, "https://fixture.squarespace.com/cultural-center");
+  assert.equal(page.urlEvidence.source, "pages_panel_href");
+  assert.deepEqual(page.urlEvidence.observedHrefs, ["https://fixture.squarespace.com/cultural-center"]);
+  assert.deepEqual(page.panelIdentity, {
+    index: 0,
+    rowDomId: "page-row-7",
+    observedLinks: [{ href: "https://fixture.squarespace.com/cultural-center", text: "Open page", ariaLabel: "Open Candidate Page" }],
+  });
+});
+
+test("resolves relative internal page hrefs against the verified website origin", () => {
+  const [page] = createPageRecords("fixture-site", website.url, [pageRecordInput({
+    observedLinks: [{ href: "greenspacing", text: "Greenspacing", ariaLabel: null }],
+  })]);
+  assert.equal(page?.url, "https://fixture.squarespace.com/greenspacing");
+});
+
+test("rejects external, root, credential-bearing, and Squarespace settings hrefs without inventing a URL", () => {
+  const external = createPageRecords("fixture-site", website.url, [pageRecordInput({
+    observedLinks: [{ href: "https://other.example/page", text: "External", ariaLabel: null }],
+  })])[0]!;
+  const root = createPageRecords("fixture-site", website.url, [pageRecordInput({
+    observedLinks: [{ href: "/", text: "Home", ariaLabel: null }],
+  })])[0]!;
+  const credentialBearing = createPageRecords("fixture-site", website.url, [pageRecordInput({
+    observedLinks: [{ href: "https://user@fixture.squarespace.com/candidate", text: "Credential URL", ariaLabel: null }],
+  })])[0]!;
+  const settings = createPageRecords("fixture-site", website.url, [pageRecordInput({
+    observedLinks: [{ href: "/config/pages", text: "Settings", ariaLabel: null }],
+  })])[0]!;
+  assert.equal(external.url, null);
+  assert.equal(external.urlEvidence.status, "rejected");
+  assert.equal(external.urlEvidence.observedHrefs[0], "https://other.example/page");
+  assert.equal(root.url, null);
+  assert.equal(credentialBearing.url, null);
+  assert.equal(settings.url, null);
+  assert.equal(settings.urlEvidence.status, "rejected");
+});
+
+test("uses the URL Slug settings value only when no unique page href is available", () => {
+  const [page] = createPageRecords("fixture-site", website.url, [pageRecordInput({ slug: "float-house" })]);
+  assert.equal(page?.url, "https://fixture.squarespace.com/float-house");
+  assert.equal(page?.urlEvidence.source, "page_settings_slug");
+  assert.equal(page?.urlEvidence.settingsSlug, "float-house");
+});
+
+test("leaves missing slugs unresolved and excludes folders even when they expose a link", () => {
+  const [missing, folder] = createPageRecords("fixture-site", website.url, [
+    pageRecordInput(),
+    pageRecordInput({
+      index: 1,
+      name: "Candidate Folder",
+      type: "folder",
+      isFolder: true,
+      observedLinks: [{ href: "/candidate-folder", text: "Folder", ariaLabel: null }],
+    }),
+  ]);
+  assert.equal(missing?.url, null);
+  assert.equal(missing?.urlEvidence.status, "missing");
+  assert.equal(folder?.type, "folder");
+  assert.equal(folder?.url, null);
+  assert.equal(folder?.urlEvidence.status, "missing");
+});
+
+test("rejects duplicate page links as ambiguous instead of selecting one", () => {
+  const [page] = createPageRecords("fixture-site", website.url, [pageRecordInput({
+    observedLinks: [
+      { href: "/team", text: "Team title", ariaLabel: null },
+      { href: "/team", text: "Open Team", ariaLabel: "Open Team" },
+    ],
+  })]);
+  assert.equal(page?.url, null);
+  assert.equal(page?.urlEvidence.status, "ambiguous");
+});
+
+test("keeps synthetic page identities separate from native Squarespace IDs", () => {
+  const [page] = createPageRecords("fixture-site", website.url, [pageRecordInput()]);
+  assert.ok(page);
+  assert.equal(page.identity.kind, "synthetic");
+  assert.equal(page.identity.native_id, null);
+  assert.equal(page.identity.synthetic_id, page.id);
+  assert.match(page.id, /^syn:v1:/);
+});
+
+test("rejects duplicate or invalid page row identities and hierarchies", () => {
+  assert.throws(() => createPageRecords("fixture-site", website.url, [
+    pageRecordInput(), pageRecordInput({ name: "Duplicate Index" }),
+  ]), { code: "PAGES_PANEL_NOT_FOUND" });
+  assert.throws(() => createPageRecords("fixture-site", website.url, [
+    pageRecordInput({ parentIndex: 7 }),
+  ]), { code: "PAGES_PANEL_NOT_FOUND" });
+});
+
 test("requires exact page IDs and never falls back to title or slug", async () => {
   const { browser, pages } = await createFixture();
   try {
@@ -453,6 +576,11 @@ test("reads and categorizes nested page records without leaving folder UI expand
     assert.equal(records.find((record) => record.name === "Footer page")?.group, "footer_navigation");
     assert.equal(records.find((record) => record.name === "Hidden page")?.group, "not_linked");
     assert.equal(records.find((record) => record.name === "Work")?.type, "folder");
+    assert.equal(records.find((record) => record.name === "Work")?.url, null);
+    const servicesPage = records.find((record) => record.name === "Services");
+    assert.equal(servicesPage?.url, "https://fixture.squarespace.com/services");
+    assert.equal(servicesPage?.urlEvidence.source, "pages_panel_href");
+    assert.deepEqual(servicesPage?.panelIdentity.observedLinks.map((link) => link.href), ["/services"]);
     assert.equal(
       records.find((record) => record.name === "Services")?.parentId,
       records.find((record) => record.name === "Work")?.id,
