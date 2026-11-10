@@ -13,7 +13,10 @@ import {
   type MutationAuthorization,
   type MutationProposalInput,
 } from "../approval/mutation-approval.js";
-import { textSectionMutationProposal } from "../approval/squarespace-mutation-proposals.js";
+import {
+  nativeTextBlockMutationProposal,
+  textSectionMutationProposal,
+} from "../approval/squarespace-mutation-proposals.js";
 import {
   analyzeRequirementsInputSchema,
   approveWorkflowTasksInputSchema,
@@ -27,11 +30,13 @@ import {
   type WorkflowStage,
   type WorkflowTask,
   type WorkflowTaskStatus,
+  type TaskAuthorization,
   type WebsiteWorkflow,
   type WorkflowQaReport,
 } from "./workflow-types.js";
 
 type WorkflowAdapterRegistry = ReadonlyMap<string, WorkflowAdapter>;
+const WORKFLOW_AUTHORIZATION_TTL_MS = 15 * 60_000;
 
 export class WebsiteWorkflowService {
   private readonly workflows = new Map<string, WebsiteWorkflow>();
@@ -152,6 +157,9 @@ export class WebsiteWorkflowService {
         });
         continue;
       }
+      const baseline = !capability.readOnly && adapter.captureBaseline
+        ? await adapter.captureBaseline(task.action, input.website_id, task)
+        : null;
       tasks.push({
         id: this.createId(),
         action: task.action,
@@ -165,6 +173,10 @@ export class WebsiteWorkflowService {
         retrySafe: capability.retrySafe,
         attempts: 0,
         args: task,
+        ...(baseline ? {
+          baseline,
+          expectedBaselineFingerprint: baseline.fingerprint,
+        } : {}),
         ...(capability.limitation ? { error: capability.limitation } : {}),
       });
     }
@@ -254,40 +266,94 @@ export class WebsiteWorkflowService {
       );
     }
     this.approvingWorkflows.add(workflow.id);
-    const authorizations: Array<{
-      task: WorkflowTask;
-      authorization: MutationAuthorization;
-    }> = [];
+    let authorization: MutationAuthorization;
     try {
-      for (const task of selectedTasks) {
-        authorizations.push({
-          task,
-          authorization: await this.mutationApproval.requestApproval(
-            this.proposalForTask(workflow, task),
-          ),
-        });
-      }
+      const operations = selectedTasks.map((task) => this.proposalForTask(workflow, task));
+      const permissionScopes = [...new Set(operations.flatMap((operation) => operation.permissionScopes))];
+      authorization = await this.mutationApproval.requestApproval({
+        provider: workflow.cms,
+        websiteId: workflow.website.id,
+        action: "workflow.execute",
+        targetResource: `workflow:${workflow.id}`,
+        payload: {
+          workflowId: workflow.id,
+          planFingerprint: workflow.fingerprint,
+          sessionContextId: workflow.website.sessionContextId ?? null,
+          tasks: selectedTasks.map((task) => ({
+            taskId: task.id,
+            action: task.action,
+            pageId: task.pageId,
+            args: task.args,
+            baseline: task.baseline ?? null,
+          })),
+          operations: operations.map((operation, index) => ({
+            taskId: selectedTasks[index]!.id,
+            provider: operation.provider,
+            websiteId: operation.websiteId,
+            ...(operation.pageId === undefined ? {} : { pageId: operation.pageId }),
+            action: operation.action,
+            targetResource: operation.targetResource,
+            payload: operation.payload,
+            permissionScopes: operation.permissionScopes,
+          })),
+        },
+        permissionScopes,
+      }, WORKFLOW_AUTHORIZATION_TTL_MS);
     } catch (error) {
-      for (const { authorization } of authorizations) {
-        this.mutationApproval.revoke(authorization.receipt);
-      }
       throw error;
     } finally {
       this.approvingWorkflows.delete(workflow.id);
     }
 
     const approved: string[] = [];
-    for (const { task, authorization } of authorizations) {
-      if (task.mutationAuthorization) {
-        this.mutationApproval.revoke(task.mutationAuthorization.receipt);
-      }
-      task.mutationAuthorization = authorization;
+    if (workflow.taskAuthorization) {
+      this.releaseWorkflowAuthorization(workflow, "revoked");
+    }
+    const pageIds = [...new Set(selectedTasks.flatMap((task) =>
+      task.pageId === null ? [] : [task.pageId]))];
+    const resourceKeys = [...new Set(selectedTasks.map((task) =>
+      task.baseline?.resourceKey ?? (task.pageId
+        ? `page:${task.pageId}`
+        : `website:${workflow.website.id}:page-list`)))];
+    const baselineFingerprints = Object.fromEntries(selectedTasks.flatMap((task) =>
+      task.baseline === undefined
+        ? []
+        : [[task.baseline.resourceKey, task.baseline.fingerprint]]));
+    const taskAuthorization: TaskAuthorization = {
+      ...authorization,
+      workflowId: workflow.id,
+      sessionContextId: workflow.website.sessionContextId ?? null,
+      provider: workflow.cms,
+      websiteId: workflow.website.id,
+      pageIds,
+      resourceKeys,
+      allowsPageCreation: selectedTasks.some((task) => task.action === "create_page"),
+      planFingerprint: workflow.fingerprint,
+      operationClasses: [...new Set(selectedTasks.map((task) => task.action))],
+      maxOperations: selectedTasks.length,
+      maxResources: resourceKeys.length,
+      baselineFingerprints,
+      authorizedAt: this.now().toISOString(),
+      expiresAt: authorization.proposal.expiresAt,
+      state: "active",
+    };
+    workflow.taskAuthorization = taskAuthorization;
+    for (const task of workflow.tasks) task.approved = false;
+    for (const task of selectedTasks) {
       task.approved = true;
       if (task.status === "blocked") task.status = "pending";
       approved.push(task.id);
     }
     workflow.updatedAt = this.now().toISOString();
     workflow.status = deriveStatus(workflow.tasks, false);
+    logInfo("workflow_task_scope_authorized", {
+      workflowId: workflow.id,
+      planFingerprint: workflow.fingerprint,
+      websiteId: workflow.website.id,
+      taskIds: approved,
+      permissionScopes: authorization.proposal.permissionScopes,
+      expiresAt: authorization.proposal.expiresAt,
+    });
     return {
       workflowId: workflow.id,
       fingerprint: workflow.fingerprint,
@@ -317,6 +383,27 @@ export class WebsiteWorkflowService {
         text,
         backgroundColor: task.args.background_color,
         textColor: task.args.text_color,
+      });
+    }
+    if (task.action === "add_text_block" || task.action === "edit_text_block") {
+      const pageId = task.args.page_id;
+      const sectionId = task.args.section_id;
+      const text = task.args.text;
+      const blockId = task.args.block_id;
+      if (!pageId || !sectionId || !text?.trim() ||
+        (task.action === "edit_text_block" && !blockId)) {
+        throw new MutationApprovalError(
+          "invalid",
+          "The native Text Block task requires an exact page, section, text, and (for edit) block ID.",
+        );
+      }
+      return nativeTextBlockMutationProposal({
+        websiteId: workflow.website.id,
+        pageId,
+        sectionId,
+        ...(task.action === "edit_text_block" && blockId ? { blockId } : {}),
+        text,
+        mode: task.action === "add_text_block" ? "create" : "edit",
       });
     }
     if (task.action === "create_page") {
@@ -351,6 +438,62 @@ export class WebsiteWorkflowService {
   }> {
     const input = executeWorkflowInputSchema.parse(rawInput);
     const workflow = this.requireWorkflow(input.workflow_id);
+    if (workflow.taskAuthorization) {
+      const proposal = workflow.taskAuthorization.proposal;
+      if (
+        proposal.action !== "workflow.execute" ||
+        proposal.websiteId !== workflow.website.id ||
+        proposal.targetResource !== `workflow:${workflow.id}` ||
+        proposal.payload.workflowId !== workflow.id ||
+        proposal.payload.planFingerprint !== workflow.fingerprint ||
+        proposal.payload.sessionContextId !== (workflow.website.sessionContextId ?? null) ||
+        workflow.taskAuthorization.workflowId !== workflow.id ||
+        workflow.taskAuthorization.websiteId !== workflow.website.id ||
+        workflow.taskAuthorization.planFingerprint !== workflow.fingerprint
+      ) {
+        this.releaseWorkflowAuthorization(workflow, "revoked");
+        throw new MutationApprovalError("scope_mismatch", "The task authorization no longer matches this workflow plan.");
+      }
+      if (workflow.taskAuthorization.state !== "active") {
+        // An ended grant cannot authorize mutations. Read-only retry and status
+        // reporting still flow through the workflow, where mutation tasks are unapproved.
+        return this.executeWorkflowAuthorized(input, workflow);
+      }
+      try {
+        return await this.mutationApproval.runTaskAuthorized(
+          workflow.taskAuthorization.proposal,
+          workflow.taskAuthorization.receipt,
+          () => this.executeWorkflowAuthorized(input, workflow),
+        );
+      } catch (error) {
+        if (workflow.taskAuthorization?.state === "active") {
+          this.releaseWorkflowAuthorization(
+            workflow,
+            error instanceof MutationApprovalError && error.reason === "expired" ? "expired" : "failed",
+          );
+        }
+        throw error;
+      }
+    }
+    return this.executeWorkflowAuthorized(input, workflow);
+  }
+
+  private async executeWorkflowAuthorized(
+    input: ReturnType<typeof executeWorkflowInputSchema.parse>,
+    workflow: WebsiteWorkflow,
+  ): Promise<{
+    workflowId: string;
+    status: WebsiteWorkflow["status"];
+    executedTaskIds: string[];
+    executedTasks: Array<{
+      taskId: string;
+      action: WorkflowAction;
+      toolName: string | null;
+      result: unknown;
+    }>;
+    executionMetrics: ExecutionMetrics;
+    tasks: ReturnType<WebsiteWorkflowService["getWorkflowStatus"]>["tasks"];
+  }> {
     if (this.approvingWorkflows.has(workflow.id)) {
       throw new SquarespaceBrowserError(
         "WORKFLOW_ALREADY_RUNNING",
@@ -388,6 +531,7 @@ export class WebsiteWorkflowService {
       result: unknown;
     }> = [];
     const retryTaskIds = new Set<string>();
+    let authorizedOperationCount = 0;
     let executionStatus: ExecutionMetrics["status"] = "succeeded";
     try {
       controller.startStage("website_verification");
@@ -406,7 +550,8 @@ export class WebsiteWorkflowService {
       controller.checkpoint();
       if (
         verifiedWebsite.id !== workflow.website.id ||
-        verifiedWebsite.url !== workflow.website.url
+        verifiedWebsite.url !== workflow.website.url ||
+        verifiedWebsite.sessionContextId !== workflow.website.sessionContextId
       ) {
         throw new SquarespaceBrowserError(
           "WORKFLOW_CMS_UNAVAILABLE",
@@ -440,11 +585,59 @@ export class WebsiteWorkflowService {
         ) break;
         if (
           task.approvalRequired &&
-          (!task.approved || !task.mutationAuthorization)
+          (!task.approved || !workflow.taskAuthorization)
         ) {
           task.status = "blocked";
-          task.error = "Trusted human approval for this exact task is required before execution.";
+          task.error = "A valid task-scoped authorization is required before execution.";
           break;
+        }
+        if (task.approvalRequired && workflow.taskAuthorization) {
+          const grant = workflow.taskAuthorization;
+          const resourceKey = task.baseline?.resourceKey ?? (task.pageId
+            ? `page:${task.pageId}`
+            : `website:${workflow.website.id}:page-list`);
+          const scopeValid = grant.provider === workflow.cms &&
+            grant.websiteId === workflow.website.id &&
+            grant.planFingerprint === workflow.fingerprint &&
+            grant.operationClasses.includes(task.action) &&
+            (task.pageId === null || grant.pageIds.includes(task.pageId)) &&
+            (task.action !== "create_page" || grant.allowsPageCreation) &&
+            grant.resourceKeys.includes(resourceKey) &&
+            authorizedOperationCount < grant.maxOperations &&
+            grant.resourceKeys.length <= grant.maxResources;
+          if (!scopeValid) {
+            task.status = "blocked";
+            task.error = "The task exceeds its authorized operation or resource scope.";
+            workflow.status = "awaiting_approval";
+            this.releaseWorkflowAuthorization(workflow, "revoked");
+            break;
+          }
+          if (task.baseline) {
+            if (!adapter.captureBaseline) {
+              task.status = "blocked";
+              task.error = "The adapter cannot revalidate the approved page baseline.";
+              workflow.status = "awaiting_approval";
+              this.releaseWorkflowAuthorization(workflow, "revoked");
+              break;
+            }
+            const currentBaseline = await adapter.captureBaseline(
+              task.action,
+              workflow.website.id,
+              task.args,
+            );
+            if (
+              !currentBaseline ||
+              currentBaseline.resourceKey !== task.baseline.resourceKey ||
+              currentBaseline.fingerprint !== task.expectedBaselineFingerprint
+            ) {
+              task.status = "blocked";
+              task.error = "The page changed after planning. Replan and authorize against the current baseline.";
+              workflow.status = "awaiting_approval";
+              this.releaseWorkflowAuthorization(workflow, "revoked");
+              break;
+            }
+          }
+          authorizedOperationCount += 1;
         }
         if (retryTaskIds.delete(task.id)) controller.recordRetry();
         task.status = "running";
@@ -452,11 +645,14 @@ export class WebsiteWorkflowService {
         controller.setTaskId(task.id);
         workflow.updatedAt = this.now().toISOString();
         logInfo("workflow_task_started", {
+          workflowId: workflow.id,
+          taskId: task.id,
+          websiteId: workflow.website.id,
           action: task.action,
         });
         controller.startStage("workflow_task");
         try {
-          task.result = await awaitExecutionOperation(
+          const executeTask = () => awaitExecutionOperation(
             adapter.execute(
               task.action,
               workflow.website.id,
@@ -467,14 +663,62 @@ export class WebsiteWorkflowService {
                 deadlineAt: controller.deadlineAt,
                 workflowId: workflow.id,
                 taskId: task.id,
-                ...(task.mutationAuthorization
-                  ? { mutationAuthorization: task.mutationAuthorization }
+              ...(workflow.taskAuthorization
+                ? { taskAuthorization: workflow.taskAuthorization }
                   : {}),
               },
             ),
             controller,
           );
+          task.result = task.approvalRequired
+            ? await this.mutationApproval.runWorkflowTaskAuthorized(task.id, executeTask)
+            : await executeTask();
           controller.checkpoint();
+          if (
+            task.action === "add_text_section" ||
+            task.action === "add_text_block" ||
+            task.action === "edit_text_block" ||
+            task.action === "create_page"
+          ) {
+            const result = asRecord(task.result);
+            task.saveVerificationStatus = result?.saved === true &&
+              (result.verified === true || task.action === "create_page") &&
+              (task.action === "create_page" || result.published === false)
+              ? "verified"
+              : result?.saved === false
+                ? "failed"
+                : "not_verified";
+            if (adapter.captureBaseline && task.saveVerificationStatus !== "verified") {
+              throw new SquarespaceBrowserError(
+                "SAVE_VERIFICATION_FAILED",
+                "The workflow operation did not return verified CMS Save evidence.",
+              );
+            }
+          }
+          if (task.baseline && adapter.captureBaseline) {
+            const latestBaseline = await adapter.captureBaseline(
+              task.action,
+              workflow.website.id,
+              task.args,
+            );
+            if (!latestBaseline || latestBaseline.resourceKey !== task.baseline.resourceKey) {
+              throw new SquarespaceBrowserError(
+                "WORKFLOW_BASELINE_UNAVAILABLE",
+                "The resulting page state could not be fingerprinted after the operation.",
+              );
+            }
+            for (const nextTask of workflow.tasks) {
+              if (
+                nextTask.status === "pending" &&
+                nextTask.baseline?.resourceKey === latestBaseline.resourceKey
+              ) {
+                nextTask.expectedBaselineFingerprint = latestBaseline.fingerprint;
+              }
+            }
+            if (workflow.taskAuthorization) {
+              workflow.taskAuthorization.baselineFingerprints[latestBaseline.resourceKey] = latestBaseline.fingerprint;
+            }
+          }
           task.status = "succeeded";
           delete task.error;
           executedTaskIds.push(task.id);
@@ -485,6 +729,9 @@ export class WebsiteWorkflowService {
             result: task.result,
           });
           logInfo("workflow_task_completed", {
+            workflowId: workflow.id,
+            taskId: task.id,
+            websiteId: workflow.website.id,
             action: task.action,
           });
         } catch (error) {
@@ -510,7 +757,6 @@ export class WebsiteWorkflowService {
           break;
         } finally {
           controller.endStage("workflow_task");
-          this.releaseTaskAuthorization(task);
         }
       }
     } catch (error) {
@@ -524,7 +770,6 @@ export class WebsiteWorkflowService {
       }
     } finally {
       controller.endStage("website_verification");
-      for (const task of workflow.tasks) this.releaseTaskAuthorization(task);
       this.runningWorkflows.delete(workflow.id);
       this.cancellationControllers.delete(workflow.id);
       workflow.updatedAt = this.now().toISOString();
@@ -533,6 +778,22 @@ export class WebsiteWorkflowService {
         executionStatus === "failed"
       ) {
         workflow.status = deriveStatus(workflow.tasks, executionStatus === "failed");
+      }
+      const hasAuthorizedPendingTask = workflow.tasks.some(
+        (task) => task.approved && task.status === "pending",
+      );
+      if (
+        !hasAuthorizedPendingTask ||
+        executionStatus !== "succeeded"
+      ) {
+        const grantState = executionStatus === "cancelled"
+          ? "cancelled"
+          : executionStatus === "succeeded" && workflow.status === "completed"
+            ? "completed"
+            : executionStatus === "timed_out"
+              ? "expired"
+              : "failed";
+        this.releaseWorkflowAuthorization(workflow, grantState);
       }
 
       workflow.executionMetrics = controller.finish(executionStatus);
@@ -551,12 +812,15 @@ export class WebsiteWorkflowService {
     };
   }
 
-  private releaseTaskAuthorization(task: WorkflowTask): void {
-    if (task.mutationAuthorization) {
-      this.mutationApproval.revoke(task.mutationAuthorization.receipt);
-      delete task.mutationAuthorization;
+  private releaseWorkflowAuthorization(
+    workflow: WebsiteWorkflow,
+    state: TaskAuthorization["state"] = "revoked",
+  ): void {
+    if (workflow.taskAuthorization) {
+      workflow.taskAuthorization.state = state;
+      this.mutationApproval.revoke(workflow.taskAuthorization.receipt);
     }
-    task.approved = false;
+    for (const task of workflow.tasks) task.approved = false;
   }
 
   cancelWorkflow(workflowId: string): {
@@ -672,6 +936,20 @@ export class WebsiteWorkflowService {
           const mutation = textSectionCheck(task.result, task.args.text);
           checks.push(mutation);
           hasOutcomeEvidence ||= mutation.status === "passed" || mutation.status === "failed";
+        } else if (task.action === "add_text_block" || task.action === "edit_text_block") {
+          const result = asRecord(task.result);
+          const verified = result?.verified === true && result.saved === true &&
+            result.published === false && result.text === task.args.text &&
+            result.sectionId === task.args.section_id &&
+            (task.action !== "edit_text_block" || result.blockId === task.args.block_id);
+          checks.push({
+            check: task.action,
+            status: verified ? "passed" : "not_verified",
+            evidence: verified
+              ? "Fresh page inspection confirmed the requested native Text Block content and Save; Publish was not performed."
+              : "The native Text Block result did not include matching fresh inspection and Save evidence.",
+          });
+          hasOutcomeEvidence ||= verified;
         }
       } else {
         checks.push({
@@ -759,6 +1037,8 @@ function stageForAction(action: WorkflowAction): WorkflowStage {
     case "manage_discounts":
       return "commerce";
     case "add_text_section":
+    case "add_text_block":
+    case "edit_text_block":
     case "create_page":
     case "edit_content_block":
     case "manage_navigation":
@@ -898,4 +1178,10 @@ function safeErrorMessage(error: unknown): string {
 
 function hashPlan(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }

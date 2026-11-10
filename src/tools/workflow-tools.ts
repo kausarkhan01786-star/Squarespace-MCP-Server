@@ -51,7 +51,7 @@ export function registerWorkflowTools(
   server.registerTool(
     "approve_workflow_tasks",
     {
-      description: "Request trusted interactive human approval for each selected mutation in the immutable workflow plan. confirmed=true and the plan fingerprint are not authorization; mutations are blocked unless the connected host supports approval elicitation.",
+      description: "Request one trusted task-scope authorization for the selected operations in the immutable workflow plan. The server binds that authorization to the exact site, plan, targets, proposed changes, and permitted operation scopes.",
       inputSchema: approveWorkflowTasksInputSchema,
       outputSchema,
       annotations: {
@@ -69,7 +69,7 @@ export function registerWorkflowTools(
   server.registerTool(
     "execute_website_workflow",
     {
-      description: "Execute available approved workflow tasks serially within the requested deadline and browser-action budget. Mutations require task-specific approval, are never automatically replayed after interruption, and are never published automatically.",
+      description: "Execute tasks covered by the active bounded workflow authorization serially within the requested deadline and browser-action budget. Routine Save is included when listed in scope; Publish is never inferred.",
       inputSchema: executeWorkflowInputSchema,
       outputSchema,
       annotations: {

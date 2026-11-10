@@ -14,6 +14,7 @@ export type ExecutionStage =
   | "editor_setup"
   | "section_creation"
   | "block_creation"
+  | "text_entry"
   | "style_application"
   | "save"
   | "result_verification"

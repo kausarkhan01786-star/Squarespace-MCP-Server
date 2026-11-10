@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { SquarespaceBrowserError } from "../browser/browser-errors.js";
 import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import type { BrowserProvider } from "../browser/browser-provider.js";
@@ -39,6 +40,8 @@ const ACTIONS: WorkflowAction[] = [
   "inspect_orders",
   "inspect_discounts",
   "add_text_section",
+  "add_text_block",
+  "edit_text_block",
   "create_page",
   "edit_content_block",
   "manage_navigation",
@@ -105,6 +108,18 @@ const IMPLEMENTED_TOOLS: Partial<Record<WorkflowAction, {
     approvalRequired: true,
     retrySafe: false,
   },
+  add_text_block: {
+    toolName: "add_text_block",
+    readOnly: false,
+    approvalRequired: true,
+    retrySafe: false,
+  },
+  edit_text_block: {
+    toolName: "edit_text_block",
+    readOnly: false,
+    approvalRequired: true,
+    retrySafe: false,
+  },
   create_page: {
     toolName: "create_page",
     readOnly: false,
@@ -130,6 +145,8 @@ const BROWSER_ACTIONS = new Set<WorkflowAction>([
   "inspect_design",
   "backup_page",
   "add_text_section",
+  "add_text_block",
+  "edit_text_block",
   "create_page",
 ]);
 
@@ -191,6 +208,42 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
     websiteId: string,
     args: PlannedTaskInput,
   ): Promise<string | null> {
+    if (action === "add_text_block" || action === "edit_text_block") {
+      const pageId = required(args.page_id, action);
+      const sectionId = required(args.section_id, action);
+      const inspection = await this.services.pages.inspectPageSections(websiteId, pageId);
+      if (inspection.sectionsTruncated || inspection.sections.some((section) =>
+        section.blocksTruncated || section.textTruncated || section.blocks.some((block) => block.textTruncated))) {
+        throw new SquarespaceBrowserError(
+          "WORKFLOW_BASELINE_UNAVAILABLE",
+          "The target page inspection is truncated; the Text Block target cannot be established safely.",
+        );
+      }
+      const matchingSections = inspection.sections.filter((section) => section.id === sectionId);
+      if (matchingSections.length !== 1) {
+        throw new SquarespaceBrowserError(
+          matchingSections.length ? "SECTION_NOT_FOUND" : "SECTION_NOT_FOUND",
+          "The supplied section ID does not identify exactly one section on the selected page.",
+        );
+      }
+      const section = matchingSections[0]!;
+      if (action === "edit_text_block") {
+        const matches = section.blocks.filter((block) => block.id === args.block_id);
+        if (matches.length !== 1) {
+          throw new SquarespaceBrowserError(
+            matches.length ? "CONTENT_BLOCK_AMBIGUOUS" : "CONTENT_BLOCK_NOT_FOUND",
+            "The supplied block ID does not identify exactly one block in the selected section.",
+          );
+        }
+        if (!isTextBlock(matches[0]!)) {
+          throw new SquarespaceBrowserError(
+            "BLOCK_EDITOR_NOT_AVAILABLE",
+            "Only an identified native Text Block can be edited by this workflow.",
+          );
+        }
+      }
+      return null;
+    }
     if (action !== "add_text_section") return null;
     try {
       await this.services.content.verifyHomePageTarget(
@@ -210,6 +263,73 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
     }
   }
 
+  async captureBaseline(
+    action: WorkflowAction,
+    websiteId: string,
+    args: PlannedTaskInput,
+  ): Promise<{ resourceKey: string; fingerprint: string } | null> {
+    if (action === "create_page") {
+      const pages = await this.services.pages.listPages(websiteId);
+      return {
+        resourceKey: `website:${websiteId}:page-list`,
+        fingerprint: hashBaseline(pages.map((page) => ({
+          id: page.id,
+          name: page.name,
+          url: page.url,
+          type: page.type,
+          group: page.group,
+          parentId: page.parentId,
+        }))),
+      };
+    }
+    if (action === "add_text_block" || action === "edit_text_block") {
+      const pageId = required(args.page_id, action);
+      const sectionId = required(args.section_id, action);
+      const inspection = await this.services.pages.inspectPageSections(websiteId, pageId);
+      const section = inspection.sections.find((candidate) => candidate.id === sectionId);
+      if (!section || inspection.sectionsTruncated || inspection.sections.some((candidate) =>
+        candidate.blocksTruncated || candidate.textTruncated || candidate.blocks.some((block) => block.textTruncated))) {
+        throw new SquarespaceBrowserError(
+          "WORKFLOW_BASELINE_UNAVAILABLE",
+          "The target section is missing or truncated; refusing to authorize a content mutation.",
+        );
+      }
+      return {
+        resourceKey: `page:${pageId}:section:${sectionId}`,
+        fingerprint: hashBaseline({ websiteId, pageId, url: inspection.url, sections: inspection.sections }),
+      };
+    }
+    if (action !== "add_text_section") return null;
+    const pageId = required(args.page_id, action);
+    const page = await this.services.pages.getPageDetails(websiteId, pageId);
+    if (page.websiteId !== websiteId || !page.url || page.type !== "page") {
+      throw new SquarespaceBrowserError(
+        "WORKFLOW_BASELINE_UNAVAILABLE",
+        "The requested page cannot be safely baselined on the selected website.",
+      );
+    }
+    const inspection = await this.services.pages.inspectPageSections(websiteId, pageId);
+    if (
+      inspection.sectionsTruncated ||
+      inspection.sections.some((section) =>
+        section.textTruncated || section.blocksTruncated || section.blocks.some((block) => block.textTruncated))
+    ) {
+      throw new SquarespaceBrowserError(
+        "WORKFLOW_BASELINE_UNAVAILABLE",
+        "The page is too large or truncated to establish a safe content baseline.",
+      );
+    }
+    return {
+      resourceKey: `page:${pageId}`,
+      fingerprint: hashBaseline({
+        websiteId,
+        pageId,
+        url: inspection.url,
+        sections: inspection.sections,
+      }),
+    };
+  }
+
   async verifyWebsite(
     websiteId: string,
     execution?: WorkflowExecutionContext,
@@ -217,6 +337,7 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
     id: string;
     name: string;
     url: string;
+    sessionContextId?: string;
   }> {
     let result: Awaited<ReturnType<BrowserProvider["verifyWebsite"]>>;
     try {
@@ -245,6 +366,9 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
       id: result.data.id,
       name: result.data.name,
       url: result.data.url,
+      ...(result.data.sessionContextId
+        ? { sessionContextId: result.data.sessionContextId }
+        : {}),
     };
   }
 
@@ -333,7 +457,17 @@ export class SquarespaceWorkflowAdapter implements WorkflowAdapter {
           background_color: args.background_color ?? "#FFFFFF",
           text_color: args.text_color ?? "#000000",
           confirm_potentially_live_save: args.confirm_potentially_live_save,
-        }, execution?.browser, execution?.mutationAuthorization);
+        }, execution?.browser, execution?.taskAuthorization);
+      case "add_text_block":
+      case "edit_text_block":
+        return this.services.content.mutateNativeTextBlock({
+          website_id: website.id,
+          page_id: required(pageId, action),
+          section_id: required(args.section_id, action),
+          ...(action === "edit_text_block" ? { block_id: required(args.block_id, action) } : {}),
+          mode: action === "add_text_block" ? "create" : "edit",
+          text: required(args.text, action),
+        }, execution?.browser, execution?.taskAuthorization);
       default:
         throw new SquarespaceBrowserError(
           "WORKFLOW_CMS_UNAVAILABLE",
@@ -349,6 +483,14 @@ function required(value: string | undefined, action: WorkflowAction): string {
     "WORKFLOW_EXECUTION_FAILED",
     `The ${action} task is missing a required identifier.`,
   );
+}
+
+function hashBaseline(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function isTextBlock(block: { type: string | null; definitionName?: string | null }): boolean {
+  return /(?:^|[.\s_-])text(?:$|[.\s_-])/i.test(`${block.type ?? ""} ${block.definitionName ?? ""}`);
 }
 
 function commerceOperationForAction(action: WorkflowAction):

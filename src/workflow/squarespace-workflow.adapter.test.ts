@@ -63,6 +63,10 @@ function createAdapter(browserProvider = {
         calls.push({ action: "addTextSection", args: [input] });
         return { verified: true };
       },
+      mutateNativeTextBlock: async (...args: unknown[]) => {
+        calls.push({ action: "mutateNativeTextBlock", args });
+        return { saved: true, verified: true };
+      },
     },
     commerce: {
       getCapabilities: () => ({
@@ -135,6 +139,38 @@ test("dispatches approved add_text_section only through the guarded content serv
     text_color: "#000000",
     confirm_potentially_live_save: true,
   });
+});
+
+test("dispatches create and edit Text Block tasks with exact section and block identities", async () => {
+  const { adapter, calls } = createAdapter();
+  await adapter.execute("add_text_block", website.id, task("add_text_block", {
+    page_id: "services",
+    section_id: "section-native",
+    text: "Section copy",
+  }));
+  await adapter.execute("edit_text_block", website.id, task("edit_text_block", {
+    page_id: "services",
+    section_id: "section-native",
+    block_id: "native-text-42",
+    text: "Edited copy",
+  }));
+  assert.deepEqual(calls.filter((call) => call.action === "mutateNativeTextBlock").map((call) => call.args[0]), [
+    {
+      website_id: website.id,
+      page_id: "services",
+      section_id: "section-native",
+      mode: "create",
+      text: "Section copy",
+    },
+    {
+      website_id: website.id,
+      page_id: "services",
+      section_id: "section-native",
+      block_id: "native-text-42",
+      mode: "edit",
+      text: "Edited copy",
+    },
+  ]);
 });
 
 test("validates the supported mutation's exact website and Home target during planning", async () => {

@@ -16,15 +16,9 @@ export class McpHumanApprovalPrompt implements HumanApprovalPrompt {
   async requestApproval(proposal: MutationProposal): Promise<boolean> {
     const capabilities = this.server.getClientCapabilities();
     if (!capabilities?.elicitation?.form) {
-      if (
-        process.env.SQUARESPACE_AUTO_APPROVE === "true" ||
-        process.env.ALLOW_DIRECT_MUTATIONS === "true"
-      ) {
-        return true;
-      }
       throw new MutationApprovalError(
         "unavailable",
-        "The connected MCP host does not advertise form elicitation; CMS mutations are disabled. Set SQUARESPACE_AUTO_APPROVE=true in environment to permit AI builder mutations without client-side form elicitation.",
+        "The connected MCP host does not advertise form elicitation; the requested task cannot be authorized safely.",
       );
     }
 
@@ -52,6 +46,22 @@ export class McpHumanApprovalPrompt implements HumanApprovalPrompt {
 }
 
 export function formatProposalForHuman(proposal: MutationProposal): string {
+  if (proposal.action === "workflow.execute") {
+    return [
+      "A complete bounded Squarespace workflow is requesting authorization.",
+      "This single authorization covers only the listed operations, exact site, targets, and proposed content. It includes routine Save where listed. It does not authorize Publish or operations outside this task.",
+      JSON.stringify({
+        provider: proposal.provider,
+        websiteId: proposal.websiteId,
+        workflow: proposal.targetResource,
+        taskScope: proposal.payload,
+        permissionScopes: proposal.permissionScopes,
+        payloadHash: proposal.payloadHash,
+        expiresAt: proposal.expiresAt,
+      }, null, 2),
+      "Declining, canceling, or leaving the approval field unchecked blocks the task.",
+    ].join("\n\n");
+  }
   const operationNotice = proposal.permissionScopes.includes("settings.update")
     ? "This proposal authorizes only the exact settings update shown. It does not authorize page-content Save or Publish."
     : proposal.permissionScopes.includes("content.publish")

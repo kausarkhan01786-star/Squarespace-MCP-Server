@@ -62,6 +62,8 @@ export const workflowActionSchema = z.enum([
   "inspect_orders",
   "inspect_discounts",
   "add_text_section",
+  "add_text_block",
+  "edit_text_block",
   "create_page",
   "edit_content_block",
   "manage_navigation",
@@ -103,12 +105,35 @@ export const planWebsiteWorkflowInputSchema = z.object({
       "inspect_design",
       "backup_page",
       "add_text_section",
+      "add_text_block",
+      "edit_text_block",
     ]);
     if (needsPage.has(task.action) && !task.page_id) {
       context.addIssue({
         code: "custom",
         path: ["page_id"],
         message: `${task.action} requires page_id.`,
+      });
+    }
+    if ((task.action === "add_text_block" || task.action === "edit_text_block") && !task.section_id) {
+      context.addIssue({
+        code: "custom",
+        path: ["section_id"],
+        message: `${task.action} requires an exact section_id returned by page inspection.`,
+      });
+    }
+    if (task.action === "edit_text_block" && !task.block_id) {
+      context.addIssue({
+        code: "custom",
+        path: ["block_id"],
+        message: "edit_text_block requires an exact existing Text Block ID.",
+      });
+    }
+    if ((task.action === "add_text_block" || task.action === "edit_text_block") && !task.text?.trim()) {
+      context.addIssue({
+        code: "custom",
+        path: ["text"],
+        message: `${task.action} requires non-empty text.`,
       });
     }
     if (task.action === "inspect_product" && !task.product_id) {
@@ -156,9 +181,6 @@ export const approveWorkflowTasksInputSchema = z.object({
   workflow_id: z.string().uuid(),
   plan_fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   task_ids: z.array(z.string().uuid()).min(1).max(20),
-  confirmed: z.literal(true).describe(
-    "Acknowledgement only. Trusted interactive human approval is requested separately and is required to authorize mutations.",
-  ),
 }).strict();
 
 export const workflowIdInputSchema = z.object({
@@ -211,6 +233,11 @@ export interface WorkflowCapability {
   limitation: string | null;
 }
 
+export interface WorkflowTaskBaseline {
+  resourceKey: string;
+  fingerprint: string;
+}
+
 export interface WorkflowAdapter {
   readonly cms: string;
   getCapabilities(): WorkflowCapability[];
@@ -219,6 +246,11 @@ export interface WorkflowAdapter {
     websiteId: string,
     args: PlannedTaskInput,
   ): Promise<string | null>;
+  captureBaseline?(
+    action: WorkflowAction,
+    websiteId: string,
+    args: PlannedTaskInput,
+  ): Promise<WorkflowTaskBaseline | null>;
   verifyWebsite(
     websiteId: string,
     execution?: WorkflowExecutionContext,
@@ -226,6 +258,7 @@ export interface WorkflowAdapter {
     id: string;
     name: string;
     url: string;
+    sessionContextId?: string;
   }>;
   execute(
     action: WorkflowAction,
@@ -241,7 +274,25 @@ export interface WorkflowExecutionContext {
   deadlineAt: number;
   workflowId: string;
   taskId: string | undefined;
-  mutationAuthorization?: MutationAuthorization;
+  taskAuthorization?: TaskAuthorization;
+}
+
+export interface TaskAuthorization extends MutationAuthorization {
+  workflowId: string;
+  sessionContextId: string | null;
+  provider: string;
+  websiteId: string;
+  pageIds: readonly string[];
+  resourceKeys: readonly string[];
+  allowsPageCreation: boolean;
+  planFingerprint: string;
+  operationClasses: readonly string[];
+  maxOperations: number;
+  maxResources: number;
+  baselineFingerprints: Record<string, string>;
+  authorizedAt: string;
+  expiresAt: string;
+  state: "active" | "completed" | "cancelled" | "expired" | "failed" | "revoked";
 }
 
 export interface WorkflowTask {
@@ -257,7 +308,9 @@ export interface WorkflowTask {
   retrySafe: boolean;
   attempts: number;
   args: PlannedTaskInput;
-  mutationAuthorization?: MutationAuthorization;
+  baseline?: WorkflowTaskBaseline;
+  expectedBaselineFingerprint?: string;
+  saveVerificationStatus?: "not_required" | "verified" | "not_verified" | "failed";
   result?: unknown;
   error?: string;
 }
@@ -265,11 +318,12 @@ export interface WorkflowTask {
 export interface WebsiteWorkflow {
   id: string;
   cms: string;
-  website: { id: string; name: string; url: string };
+  website: { id: string; name: string; url: string; sessionContextId?: string };
   brief: ClientBrief;
   designSpecification: DesignSpecification | null;
   tasks: WorkflowTask[];
   fingerprint: string;
+  taskAuthorization?: TaskAuthorization;
   status: WorkflowStatus;
   createdAt: string;
   updatedAt: string;

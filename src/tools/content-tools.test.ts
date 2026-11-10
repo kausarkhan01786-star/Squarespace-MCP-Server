@@ -208,13 +208,13 @@ test("an approval for one exact text cannot authorize different content", async 
   assert.equal(pageReads, 0);
 });
 
-test("rejects a different website before creating a backup or opening the editor", async () => {
+test("rejects an invalid website URL before creating a backup or opening the editor", async () => {
   let openCalls = 0;
   let backupCalls = 0;
   const service = new SquarespaceContentService(
     {
       getWebsite() {
-        return { ...confirmedWebsite, name: "Different site" };
+        return { ...confirmedWebsite, url: "http://untrusted.invalid" };
       },
       async openWebsiteUrl() {
         openCalls += 1;

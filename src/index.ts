@@ -91,7 +91,7 @@ async function main(): Promise<void> {
   );
   registerSettingsExecutionTools(server, settingsExecution, browserOperationLock);
   registerWorkflowTools(server, workflow, browserOperationLock);
-  registerHeroTools(server, browser, pages, browserOperationLock);
+  registerHeroTools(server);
   transport.onclose = () => {
     void browserOperationLock.runExclusive(() => browser.close()).catch((error: unknown) => {
       logError("browser_close_failed", error);

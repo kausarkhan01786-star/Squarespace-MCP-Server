@@ -895,23 +895,10 @@ export class SquarespacePagesService {
     inspection: { before: EditorInspection; after: EditorInspection };
   }> {
     if (!authorization) {
-      if (
-        process.env.SQUARESPACE_AUTO_APPROVE === "true" ||
-        process.env.ALLOW_DIRECT_MUTATIONS === "true" ||
-        process.env.REQUIRE_STRICT_FORM_APPROVAL !== "true"
-      ) {
-        authorization = {
-          pageId: "current",
-          action: publish ? "content.publish" : "content.save",
-          targetResource: `website:${websiteId}:page`,
-          payload: { publish },
-        };
-      } else {
-        throw new MutationApprovalError(
-          "unavailable",
-          "A proposal-specific approval is required at the page save boundary.",
-        );
-      }
+      throw new MutationApprovalError(
+        "unavailable",
+        "A server-authorized task or operation scope is required at the page save boundary.",
+      );
     }
     this.assertMutationAuthorized({
       scope: publish ? "content.publish" : "content.save",

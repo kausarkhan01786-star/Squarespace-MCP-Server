@@ -33,3 +33,32 @@ export function textSectionMutationPayload(
     publish: false,
   };
 }
+
+export function nativeTextBlockMutationProposal(input: {
+  websiteId: string;
+  pageId: string;
+  sectionId: string;
+  blockId?: string;
+  text: string;
+  mode: "create" | "edit";
+}): MutationProposalInput {
+  const scope = input.mode === "create" ? "content.block.create" : "content.block.edit";
+  return {
+    provider: "squarespace",
+    websiteId: input.websiteId,
+    pageId: input.pageId,
+    action: input.mode === "create" ? "content.create_text_block" : "content.edit_text_block",
+    targetResource: input.blockId
+      ? `page:${input.pageId}:section:${input.sectionId}:block:${input.blockId}`
+      : `page:${input.pageId}:section:${input.sectionId}:new-text-block`,
+    payload: {
+      sectionId: input.sectionId,
+      ...(input.blockId ? { blockId: input.blockId } : {}),
+      blockType: "Text",
+      text: input.text,
+      save: true,
+      publish: false,
+    },
+    permissionScopes: [scope, "content.save"],
+  };
+}

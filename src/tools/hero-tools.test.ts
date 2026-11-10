@@ -77,6 +77,10 @@ test("registers a read-only Hero planner and returns a plan without editing a we
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     const listed = await client.listTools();
+    assert.equal(
+      listed.tools.some((candidate) => candidate.name === "build_squarespace_hero"),
+      false,
+    );
     const tool = listed.tools.find((candidate) => candidate.name === "plan_squarespace_hero");
     assert.ok(tool);
     assert.equal(tool.annotations?.readOnlyHint, true);

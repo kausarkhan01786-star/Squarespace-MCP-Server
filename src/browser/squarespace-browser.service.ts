@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -63,6 +63,12 @@ export interface WebsiteSummary {
   url: string;
 }
 
+export interface AuthenticatedWebsiteContext {
+  website: WebsiteSummary;
+  /** Server-generated browser-context generation, not a Squarespace account identity. */
+  sessionContextId: string;
+}
+
 export interface PageInspection {
   title: string;
   url: string;
@@ -100,6 +106,7 @@ export class SquarespaceBrowserService {
   private readonly loginTimeoutMs: number;
   private context: BrowserContext | undefined;
   private page: Page | undefined;
+  private contextGenerationId: string | undefined;
   private navigationCancellation: Promise<void> | undefined;
   private readonly websiteDestinations = new Map<string, WebsiteSummary>();
 
@@ -192,10 +199,10 @@ export class SquarespaceBrowserService {
     };
   }
 
-  async listWebsites(): Promise<WebsiteSummary[]> {
+  async listWebsites(execution?: BrowserExecutionContext): Promise<WebsiteSummary[]> {
     const page = await this.getPage();
     if (new URL(page.url()).origin !== new URL(ACCOUNT_DASHBOARD_URL).origin) {
-      await this.navigate(page, ACCOUNT_DASHBOARD_URL);
+      await this.navigate(page, ACCOUNT_DASHBOARD_URL, execution);
     }
     if (!(await this.isDashboardAuthenticated(page))) {
       throw new SquarespaceBrowserError(
@@ -260,6 +267,27 @@ export class SquarespaceBrowserService {
     }
 
     return [...uniqueSites.values()];
+  }
+
+  async verifyWebsiteInAuthenticatedAccount(
+    websiteId: string,
+    execution?: BrowserExecutionContext,
+  ): Promise<AuthenticatedWebsiteContext> {
+    const websites = await this.listWebsites(execution);
+    const website = websites.find((candidate) => candidate.id === websiteId);
+    if (!website) {
+      throw new SquarespaceBrowserError(
+        "WEBSITE_NOT_AUTHORIZED",
+        "The selected website is not present in the currently authenticated Squarespace account dashboard.",
+      );
+    }
+    if (!this.contextGenerationId) {
+      throw new SquarespaceBrowserError(
+        "AUTHENTICATED_CONTEXT_UNAVAILABLE",
+        "The authenticated browser context could not be bound to this website task.",
+      );
+    }
+    return { website, sessionContextId: this.contextGenerationId };
   }
 
   async switchWebsite(websiteId: string): Promise<void> {
@@ -393,6 +421,7 @@ export class SquarespaceBrowserService {
     const context = this.context;
     this.context = undefined;
     this.page = undefined;
+    this.contextGenerationId = undefined;
     this.websiteDestinations.clear();
 
     if (context) {
@@ -457,10 +486,12 @@ export class SquarespaceBrowserService {
         timeout: this.timeoutMs,
       });
       this.context = context;
+      this.contextGenerationId = randomUUID();
       context.on("close", () => {
         if (this.context === context) {
           this.context = undefined;
           this.page = undefined;
+          this.contextGenerationId = undefined;
           this.websiteDestinations.clear();
         }
       });

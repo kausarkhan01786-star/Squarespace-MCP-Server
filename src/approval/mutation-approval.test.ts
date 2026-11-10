@@ -82,6 +82,118 @@ test("binds a one-time receipt to the exact proposal and rejects replay", async 
   );
 });
 
+test("one workflow authorization permits only its enumerated operations", async () => {
+  const approval = new MutationApprovalGuard({ requestApproval: async () => true });
+  const textPayload = proposalInput.payload;
+  const pageOperation = {
+    provider: "squarespace",
+    websiteId: "site-1",
+    pageId: "home-1",
+    action: "content.add_text_section",
+    targetResource: "page:home-1:bottom-section",
+    payload: textPayload,
+    permissionScopes: ["content.section.create", "content.save"],
+  };
+  const workflow = await approval.requestApproval({
+    provider: "squarespace",
+    websiteId: "site-1",
+    action: "workflow.execute",
+    targetResource: "workflow:workflow-1",
+    payload: {
+      workflowId: "workflow-1",
+      planFingerprint: "a".repeat(64),
+      tasks: [{ taskId: "task-1" }],
+      operations: [{ ...pageOperation, taskId: "task-1" }],
+    },
+    permissionScopes: ["content.section.create", "content.save"],
+  });
+
+  await approval.runTaskAuthorized(workflow.proposal, workflow.receipt, async () =>
+    approval.runWorkflowTaskAuthorized("task-1", async () => {
+    approval.assertAuthorized({
+      scope: "content.section.create",
+      provider: "squarespace",
+      websiteId: "site-1",
+      pageId: "home-1",
+      action: "content.add_text_section",
+      targetResource: "page:home-1:bottom-section",
+      payload: textPayload,
+    });
+    await assert.rejects(
+      approval.runWorkflowTaskAuthorized("task-2", async () => Promise.resolve()),
+      { reason: "scope_mismatch" },
+    );
+    approval.assertAuthorized({
+      scope: "content.save",
+      provider: "squarespace",
+      websiteId: "site-1",
+      pageId: "home-1",
+      action: "content.add_text_section",
+      targetResource: "page:home-1:bottom-section",
+      payload: textPayload,
+    });
+    assert.throws(() => approval.assertAuthorized({
+      scope: "content.section.create",
+      provider: "squarespace",
+      websiteId: "site-1",
+      pageId: "other-page",
+      action: "content.add_text_section",
+      targetResource: "page:other-page:bottom-section",
+      payload: textPayload,
+    }), { reason: "scope_mismatch" });
+  }));
+});
+
+test("task authorization is reusable only within its live server-issued grant", async () => {
+  let now = new Date("2025-01-01T00:00:00.000Z");
+  const approval = new MutationApprovalGuard(
+    { requestApproval: async () => true },
+    10_000,
+    () => now,
+  );
+  const authorization = await approval.requestApproval({
+    provider: "squarespace",
+    websiteId: "site-1",
+    action: "workflow.execute",
+    targetResource: "workflow:workflow-1",
+    payload: {
+      workflowId: "workflow-1",
+      planFingerprint: "b".repeat(64),
+      tasks: [{ taskId: "task-1" }],
+      operations: [{
+        taskId: "task-1",
+        provider: "squarespace",
+        websiteId: "site-1",
+        pageId: "home-1",
+        action: "content.add_text_section",
+        targetResource: "page:home-1:bottom-section",
+        payload: proposalInput.payload,
+        permissionScopes: ["content.section.create", "content.save"],
+      }],
+    },
+    permissionScopes: ["content.section.create", "content.save"],
+  }, 5_000);
+  for (let n = 0; n < 2; n += 1) {
+    await approval.runTaskAuthorized(authorization.proposal, authorization.receipt, async () =>
+      approval.runWorkflowTaskAuthorized("task-1", async () => {
+      approval.assertAuthorized({
+        scope: "content.section.create",
+        provider: "squarespace",
+        websiteId: "site-1",
+        pageId: "home-1",
+        action: "content.add_text_section",
+        targetResource: "page:home-1:bottom-section",
+        payload: proposalInput.payload,
+      });
+    }));
+  }
+  now = new Date("2025-01-01T00:00:05.001Z");
+  await assert.rejects(
+    approval.runTaskAuthorized(authorization.proposal, authorization.receipt, async () => {}),
+    { reason: "expired" },
+  );
+});
+
 test("rejects mismatched targets, actions, payloads, and permission scopes", async () => {
   const approval = new MutationApprovalGuard({ requestApproval: async () => true });
   const authorization = await approval.requestApproval(proposalInput);

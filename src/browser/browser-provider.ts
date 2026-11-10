@@ -26,6 +26,7 @@ export interface BrowserWebsite {
   id: string;
   name: string;
   url: string;
+  sessionContextId?: string;
 }
 
 export interface BrowserPageInspection {

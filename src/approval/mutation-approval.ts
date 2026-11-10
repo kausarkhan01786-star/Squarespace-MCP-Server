@@ -3,6 +3,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 export type MutationPermissionScope =
   | "content.section.create"
+  | "content.block.create"
+  | "content.block.edit"
   | "content.save"
   | "content.publish"
   | "content.delete"
@@ -53,6 +55,8 @@ interface ReceiptRecord {
 interface ActiveAuthorization {
   proposal: MutationProposal;
   coreFingerprint: string;
+  expiresAt: number;
+  taskId?: string;
 }
 
 const activeAuthorization = new AsyncLocalStorage<ActiveAuthorization>();
@@ -140,11 +144,15 @@ export class MutationApprovalGuard {
     }
   }
 
-  async requestApproval(input: MutationProposalInput): Promise<{
+  hasActiveAuthorization(): boolean {
+    return activeAuthorization.getStore() !== undefined;
+  }
+
+  async requestApproval(input: MutationProposalInput, ttlMs = this.ttlMs): Promise<{
     proposal: MutationProposal;
     receipt: MutationApprovalReceipt;
   }> {
-    const proposal = createMutationProposal(input, this.now(), this.ttlMs);
+    const proposal = createMutationProposal(input, this.now(), ttlMs);
     let accepted: boolean;
     try {
       accepted = await this.prompt.requestApproval(proposal);
@@ -199,11 +207,57 @@ export class MutationApprovalGuard {
     receipt: MutationApprovalReceipt,
     operation: () => Promise<T>,
   ): Promise<T> {
+    if (proposal.action === "workflow.execute") {
+      throw new MutationApprovalError(
+        "invalid",
+        "Workflow task grants must run through the task-scoped authorization boundary.",
+      );
+    }
     this.consume(proposal, receipt);
     return activeAuthorization.run(
-      { proposal, coreFingerprint: fingerprintProposalCore(proposal) },
+      { proposal, coreFingerprint: fingerprintProposalCore(proposal), expiresAt: Date.parse(proposal.expiresAt) },
       operation,
     );
+  }
+
+  async runTaskAuthorized<T>(
+    proposal: MutationProposal,
+    receipt: MutationApprovalReceipt,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (
+      proposal.action !== "workflow.execute" ||
+      !Array.isArray(proposal.payload.operations) ||
+      !Array.isArray(proposal.payload.tasks)
+    ) {
+      throw new MutationApprovalError("invalid", "A bounded workflow task authorization is required.");
+    }
+    if (!this.isAuthorizationValid(proposal, receipt)) {
+      throw new MutationApprovalError("expired", "The task authorization is invalid, revoked, or expired.");
+    }
+    return activeAuthorization.run(
+      { proposal, coreFingerprint: fingerprintProposalCore(proposal), expiresAt: Date.parse(proposal.expiresAt) },
+      operation,
+    );
+  }
+
+  async runWorkflowTaskAuthorized<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
+    const active = activeAuthorization.getStore();
+    if (!active || active.proposal.action !== "workflow.execute") {
+      throw new MutationApprovalError("unavailable", "No active workflow task authorization exists.");
+    }
+    if (active.expiresAt <= this.now().getTime()) {
+      throw new MutationApprovalError("expired", "The workflow task authorization has expired.");
+    }
+    const tasks = active.proposal.payload.tasks;
+    if (
+      !Array.isArray(tasks) ||
+      !tasks.some((task) => task !== null && typeof task === "object" &&
+        (task as Record<string, unknown>).taskId === taskId)
+    ) {
+      throw new MutationApprovalError("scope_mismatch", "This task ID is outside the authorized workflow scope.");
+    }
+    return activeAuthorization.run({ ...active, taskId }, operation);
   }
 
   assertAuthorized(input: {
@@ -217,13 +271,10 @@ export class MutationApprovalGuard {
   }): void {
     const active = activeAuthorization.getStore();
     const proposal = active?.proposal;
+    if (active && active.expiresAt <= this.now().getTime()) {
+      throw new MutationApprovalError("expired", "The task or operation authorization has expired.");
+    }
     if (!proposal) {
-      if (
-        process.env.SQUARESPACE_AUTO_APPROVE === "true" ||
-        process.env.ALLOW_DIRECT_MUTATIONS === "true"
-      ) {
-        return;
-      }
       throw new MutationApprovalError(
         "unavailable",
         "No trusted, proposal-specific human authorization is active; the mutation was blocked.",
@@ -238,15 +289,37 @@ export class MutationApprovalGuard {
       ...(input.payload === undefined ? {} : { payload: input.payload }),
       scope: input.scope,
     };
+    const aggregateOperations = proposal.action === "workflow.execute"
+      ? proposal.payload.operations
+      : undefined;
+    const aggregateMatch = proposal.provider === expectedCore.provider &&
+      proposal.websiteId === expectedCore.websiteId &&
+      expectedCore.action !== undefined &&
+      expectedCore.targetResource !== undefined &&
+      expectedCore.payload !== undefined &&
+      Array.isArray(aggregateOperations) && aggregateOperations.some((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const operation = entry as Record<string, unknown>;
+      const operationScopes = operation.permissionScopes;
+      return operation.provider === expectedCore.provider &&
+        operation.websiteId === expectedCore.websiteId &&
+        operation.pageId === expectedCore.pageId &&
+        operation.targetResource === expectedCore.targetResource &&
+        operation.action === expectedCore.action &&
+        operation.taskId === active.taskId &&
+        stableStringify(operation.payload) === stableStringify(expectedCore.payload) &&
+        Array.isArray(operationScopes) && operationScopes.includes(expectedCore.scope);
+    });
+    const exactMatch =
+      proposal.provider === expectedCore.provider &&
+      proposal.websiteId === expectedCore.websiteId &&
+      (expectedCore.targetResource === undefined || proposal.targetResource === expectedCore.targetResource) &&
+      (expectedCore.pageId === undefined || proposal.pageId === expectedCore.pageId) &&
+      (expectedCore.action === undefined || proposal.action === expectedCore.action) &&
+      (expectedCore.payload === undefined ||
+        stableStringify(proposal.payload) === stableStringify(expectedCore.payload));
     if (
-      proposal.provider !== expectedCore.provider ||
-      proposal.websiteId !== expectedCore.websiteId ||
-      (expectedCore.targetResource !== undefined &&
-        proposal.targetResource !== expectedCore.targetResource) ||
-      (expectedCore.pageId !== undefined && proposal.pageId !== expectedCore.pageId) ||
-      (expectedCore.action !== undefined && proposal.action !== expectedCore.action) ||
-      (expectedCore.payload !== undefined &&
-        stableStringify(proposal.payload) !== stableStringify(expectedCore.payload)) ||
+      (!exactMatch && !aggregateMatch) ||
       !proposal.permissionScopes.includes(expectedCore.scope) ||
       active.coreFingerprint !== fingerprintProposalCore(proposal)
     ) {

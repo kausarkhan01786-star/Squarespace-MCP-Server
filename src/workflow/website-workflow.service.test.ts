@@ -48,6 +48,8 @@ function createAdapter(overrides: Partial<WorkflowAdapter> = {}) {
       capability("inspect_pages", "list_pages", true, false, true),
       capability("inspect_responsive", "inspect_mobile_responsive", true, false, true),
       capability("add_text_section", "add_text_section", false, true, false),
+      capability("add_text_block", "add_text_block", false, true, false),
+      capability("edit_text_block", "edit_text_block", false, true, false),
       capability("create_page", null, false, true, false, false),
     ],
     verifyWebsite: async (websiteId) => {
@@ -60,6 +62,9 @@ function createAdapter(overrides: Partial<WorkflowAdapter> = {}) {
       calls.push({ action, websiteId });
       if (action === "inspect_responsive") {
         return { mobile: { horizontalOverflow: false } };
+      }
+      if (action === "add_text_block" || action === "edit_text_block") {
+        return { blockId: "native-block-1", saved: true, published: false, verified: true, text: "New copy", sectionId: "section-1" };
       }
       return { success: true };
     },
@@ -206,7 +211,6 @@ test("requires immutable-plan approval before executing live content changes", a
       workflow_id: plan.workflowId,
       plan_fingerprint: "0".repeat(64),
       task_ids: [taskId],
-      confirmed: true,
     }),
     (error: unknown) =>
       error instanceof SquarespaceBrowserError &&
@@ -216,7 +220,6 @@ test("requires immutable-plan approval before executing live content changes", a
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [taskId],
-    confirmed: true,
   });
   const executed = await service.executeWorkflow({
     workflow_id: plan.workflowId,
@@ -230,7 +233,7 @@ test("requires immutable-plan approval before executing live content changes", a
   assert.equal(service.getQaReport(plan.workflowId).status, "partial");
 });
 
-test("workflow approval requires host acceptance of the exact proposal, not confirmed=true", async () => {
+test("workflow approval requests one host decision for the exact bounded task scope", async () => {
   let promptProposal: MutationProposal | undefined;
   const { adapter } = createAdapter();
   const service = createService(
@@ -253,13 +256,137 @@ test("workflow approval requires host acceptance of the exact proposal, not conf
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
-    confirmed: true,
   }), { reason: "rejected" });
   assert.equal(promptProposal?.websiteId, website.id);
-  assert.equal(promptProposal?.pageId, "home");
-  assert.equal(promptProposal?.payload.publish, false);
+  assert.equal(promptProposal?.action, "workflow.execute");
+  assert.equal(promptProposal?.payload.planFingerprint, plan.fingerprint);
+  assert.equal((promptProposal?.payload.operations as unknown[]).length, 1);
+  assert.deepEqual(promptProposal?.permissionScopes, ["content.save", "content.section.create"]);
   assert.equal(service.getWorkflowStatus(plan.workflowId).tasks[0]?.approved, false);
   assert.equal(service.getWorkflowStatus(plan.workflowId).tasks[0]?.status, "pending");
+});
+
+test("one authorization covers multiple planned mutation tasks and prompts only once", async () => {
+  let prompts = 0;
+  const { adapter, calls } = createAdapter();
+  const service = createService(adapter, undefined, async () => {
+    prompts += 1;
+    return true;
+  });
+  const plan = await service.planWorkflow(planInput([
+    {
+      action: "add_text_section",
+      page_id: "home",
+      text: "First section",
+      background_color: "#FFFFFF",
+      text_color: "#000000",
+    },
+    {
+      action: "add_text_section",
+      page_id: "home",
+      text: "Second section",
+      background_color: "#FFFFFF",
+      text_color: "#000000",
+    },
+  ]));
+
+  const approved = await service.approveTasks({
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: plan.tasks.map((task) => task.id),
+  });
+  assert.equal(prompts, 1);
+  assert.equal(approved.approvedTaskIds.length, 2);
+
+  const result = await service.executeWorkflow({
+    workflow_id: plan.workflowId,
+    max_tasks: 2,
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls.length, 2);
+});
+
+test("revokes the task grant when the approved resource baseline changes", async () => {
+  let baselineReads = 0;
+  const { adapter, calls } = createAdapter({
+    captureBaseline: async () => ({
+      resourceKey: "page:home",
+      fingerprint: ++baselineReads === 1 ? "baseline-before" : "baseline-changed",
+    }),
+  });
+  const service = createService(adapter);
+  const plan = await service.planWorkflow(planInput([{
+    action: "add_text_section",
+    page_id: "home",
+    text: "Hello",
+    background_color: "#FFFFFF",
+    text_color: "#000000",
+  }]));
+  await service.approveTasks({
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: [plan.tasks[0]!.id],
+  });
+
+  const result = await service.executeWorkflow({ workflow_id: plan.workflowId, max_tasks: 1 });
+  assert.equal(result.status, "awaiting_approval");
+  assert.equal(result.tasks[0]?.status, "blocked");
+  assert.match(result.tasks[0]?.error ?? "", /changed after planning/i);
+  assert.equal(calls.length, 0);
+});
+
+test("one task grant authorizes multiple exact native Text Block operations", async () => {
+  let prompts = 0;
+  const { adapter, calls } = createAdapter();
+  const service = createService(adapter, undefined, async () => { prompts += 1; return true; });
+  const plan = await service.planWorkflow(planInput([
+    {
+      action: "add_text_block",
+      page_id: "services",
+      section_id: "section-1",
+      text: "New copy",
+    },
+    {
+      action: "edit_text_block",
+      page_id: "services",
+      section_id: "section-1",
+      block_id: "existing-text-1",
+      text: "New copy",
+    },
+  ]));
+  assert.deepEqual(plan.tasks.map((task) => task.status), ["pending", "pending"]);
+  await service.approveTasks({
+    workflow_id: plan.workflowId,
+    plan_fingerprint: plan.fingerprint,
+    task_ids: plan.tasks.map((task) => task.id),
+  });
+  assert.equal(prompts, 1);
+  const result = await service.executeWorkflow({ workflow_id: plan.workflowId, max_tasks: 2 });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(calls.map((call) => call.action), ["add_text_block", "edit_text_block"]);
+  assert.equal(result.tasks.every((task) => task.status === "succeeded"), true);
+});
+
+test("Text Block workflow tasks require explicit section and existing block identities", async () => {
+  const { adapter } = createAdapter();
+  const service = createService(adapter);
+  await assert.rejects(
+    service.planWorkflow(planInput([{
+      action: "add_text_block",
+      page_id: "services",
+      text: "Copy",
+    }])),
+    { name: "ZodError" },
+  );
+  await assert.rejects(
+    service.planWorkflow(planInput([{
+      action: "edit_text_block",
+      page_id: "services",
+      section_id: "section-1",
+      text: "Copy",
+    }])),
+    { name: "ZodError" },
+  );
 });
 
 test("prevents overlapping approval prompts and workflow execution", async () => {
@@ -292,7 +419,6 @@ test("prevents overlapping approval prompts and workflow execution", async () =>
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
-    confirmed: true as const,
   };
   const approving = service.approveTasks(approvalInput);
   await started;
@@ -333,7 +459,6 @@ test("rejects a mixed valid/invalid approval request without granting partial ap
       workflow_id: plan.workflowId,
       plan_fingerprint: plan.fingerprint,
       task_ids: [plan.tasks[0]!.id, uuid(999)],
-      confirmed: true,
     }),
     (error: unknown) =>
       error instanceof SquarespaceBrowserError &&
@@ -374,7 +499,6 @@ test("serializes execution and does not retry failed mutation tasks", async () =
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
-    confirmed: true,
   });
   const firstExecution = service.executeWorkflow({
     workflow_id: plan.workflowId,
@@ -456,7 +580,6 @@ test("cancellation interrupts an in-flight mutation and never replays it", async
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
-    confirmed: true,
   });
 
   const running = service.executeWorkflow({ workflow_id: plan.workflowId, max_tasks: 1 });
@@ -570,7 +693,6 @@ test("deadline after a mutation starts marks it interrupted rather than retryabl
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
-    confirmed: true,
   });
 
   const result = await service.executeWorkflow({
@@ -607,7 +729,6 @@ test("browser-action budget is reported and an interrupted mutation is not retri
     workflow_id: plan.workflowId,
     plan_fingerprint: plan.fingerprint,
     task_ids: [plan.tasks[0]!.id],
-    confirmed: true,
   });
 
   const result = await service.executeWorkflow({

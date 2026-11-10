@@ -21,7 +21,7 @@ import type { SquarespacePagesService } from "./squarespace-pages.service.js";
 type PlaywrightBrowser = Pick<
   SquarespaceBrowserService,
   "getWebsite" | "inspectCurrentPage" | "captureScreenshot" | "openWebsiteUrl" | "cancelActiveNavigation"
->;
+> & Partial<Pick<SquarespaceBrowserService, "verifyWebsiteInAuthenticatedAccount">>;
 type PlaywrightPages = Pick<SquarespacePagesService, "inspectPageSections">;
 
 const CAPABILITY_NAMES = [
@@ -57,11 +57,19 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     execution?: BrowserExecutionContext,
   ): Promise<BrowserOperationResult<BrowserWebsite>> {
     execution?.checkpoint();
-    const website = this.browser.getWebsite(websiteId);
+    const authorized = this.browser.verifyWebsiteInAuthenticatedAccount
+      ? await this.browser.verifyWebsiteInAuthenticatedAccount(websiteId, execution)
+      : undefined;
+    const website = authorized?.website ?? this.browser.getWebsite(websiteId);
     assertAllowedSquarespaceUrl(website.url);
     return {
       status: "supported",
-      data: { id: website.id, name: sanitizeText(website.name), url: redactUrl(website.url) },
+      data: {
+        id: website.id,
+        name: sanitizeText(website.name),
+        url: redactUrl(website.url),
+        ...(authorized ? { sessionContextId: authorized.sessionContextId } : {}),
+      },
     };
   }
 

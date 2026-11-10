@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Page, Frame, Locator } from "playwright";
 import {
@@ -17,6 +18,7 @@ import {
   type MutationAuthorization,
 } from "../approval/mutation-approval.js";
 import {
+  nativeTextBlockMutationProposal,
   textSectionMutationPayload,
   textSectionMutationProposal,
 } from "../approval/squarespace-mutation-proposals.js";
@@ -31,7 +33,6 @@ import type {
 } from "./squarespace-browser.service.js";
 import { logInfo } from "../utils/logger.js";
 
-const CONFIRMED_WEBSITE_HOST = "cobalt-spinach-eeah.squarespace.com";
 const SECTION_SELECTOR = SQUARESPACE_PAGE_SECTION_SELECTOR;
 const BLOCK_SELECTOR = "[data-block-type]";
 const SITE_FRAME_SELECTOR = 'iframe#sqs-site-frame[data-testid="sqs-site-frame"], iframe#sqs-site-frame';
@@ -57,8 +58,8 @@ const SECTION_SETTINGS_CONTROL_SELECTORS = [
 ];
 
 export const addTextSectionInputSchema = z.object({
-  website_id: z.string().trim().min(1).describe("ID returned by list_websites for Kausar Mia."),
-  page_id: z.string().trim().min(1).describe("ID returned by list_pages for Home."),
+  website_id: z.string().trim().min(1).describe("ID returned by list_websites for the authenticated Squarespace account."),
+  page_id: z.string().trim().min(1).describe("ID returned by list_pages for the selected website."),
   text: z.string().min(1).max(500).refine((value) => value.trim().length > 0),
   background_color: z.string().regex(/^#[0-9a-fA-F]{6}$/).default("#FFFFFF"),
   text_color: z.string().regex(/^#[0-9a-fA-F]{6}$/).default("#000000"),
@@ -68,6 +69,37 @@ export const addTextSectionInputSchema = z.object({
 });
 
 export type AddTextSectionInput = z.infer<typeof addTextSectionInputSchema>;
+
+const nativeTextBlockInputSchema = z.object({
+  website_id: z.string().trim().min(1),
+  page_id: z.string().trim().min(1),
+  section_id: z.string().trim().min(1),
+  block_id: z.string().trim().min(1).optional(),
+  mode: z.enum(["create", "edit"]),
+  text: z.string().min(1).max(500).refine((value) => value.trim().length > 0),
+}).strict().superRefine((input, context) => {
+  if (input.mode === "edit" && !input.block_id) {
+    context.addIssue({ code: "custom", path: ["block_id"], message: "Editing requires the exact existing block ID." });
+  }
+  if (input.mode === "create" && input.block_id) {
+    context.addIssue({ code: "custom", path: ["block_id"], message: "Creating a block cannot accept a caller-supplied block ID." });
+  }
+});
+
+export type NativeTextBlockInput = z.infer<typeof nativeTextBlockInputSchema>;
+
+export interface NativeTextBlockResult {
+  websiteId: string;
+  pageId: string;
+  sectionId: string;
+  blockId: string;
+  mode: "create" | "edit";
+  text: string;
+  saved: true;
+  published: false;
+  verified: true;
+  saveAction: "saved" | "already_saved";
+}
 
 type ContentBrowser = Pick<
   SquarespaceBrowserService,
@@ -136,10 +168,10 @@ export class SquarespaceContentService {
     verified: true;
     executionMetrics?: ExecutionMetrics;
   }> {
-    if (!authorization) {
+    if (!authorization && !this.approval.hasActiveAuthorization()) {
       throw new MutationApprovalError(
         "unavailable",
-        "A trusted interactive approval is required before changing Squarespace content.",
+        "A valid task-scoped or operation-scoped authorization is required before changing Squarespace content.",
       );
     }
     const ownedController = execution
@@ -147,14 +179,15 @@ export class SquarespaceContentService {
       : new ExecutionController({ timeoutMs: 180_000, maxBrowserActions: 100 });
     const context = execution ?? ownedController!;
     try {
-      const result = await this.approval.runAuthorized(
-        authorization.proposal,
-        authorization.receipt,
-        () => withBrowserExecutionContext(
-          context,
-          () => this.runAddTextSection(rawInput, context),
-        ),
+      const execute = () => withBrowserExecutionContext(
+        context,
+        () => this.runAddTextSection(rawInput, context),
       );
+      const result = this.approval.hasActiveAuthorization()
+        ? await execute()
+        : authorization
+          ? await this.approval.runAuthorized(authorization.proposal, authorization.receipt, execute)
+          : await execute();
       if (!ownedController) return result;
       const executionMetrics = ownedController.finish("succeeded");
       logInfo("content_execution_metrics", executionMetrics);
@@ -181,7 +214,307 @@ export class SquarespaceContentService {
       }
       throw stopped;
     } finally {
-      this.approval.revoke(authorization.receipt);
+      this.approval.revoke(
+        authorization?.proposal.action === "workflow.execute" ? undefined : authorization?.receipt,
+      );
+    }
+  }
+
+  async mutateNativeTextBlock(
+    rawInput: unknown,
+    execution?: BrowserExecutionContext,
+    authorization?: MutationAuthorization,
+  ): Promise<NativeTextBlockResult> {
+    if (!authorization && !this.approval.hasActiveAuthorization()) {
+      throw new MutationApprovalError("unavailable", "A task-scoped authorization is required for native Text Block changes.");
+    }
+    const input = nativeTextBlockInputSchema.parse(rawInput);
+    const proposal = nativeTextBlockMutationProposal({
+      websiteId: input.website_id,
+      pageId: input.page_id,
+      sectionId: input.section_id,
+      ...(input.block_id ? { blockId: input.block_id } : {}),
+      text: input.text,
+      mode: input.mode,
+    });
+    const operationScope = input.mode === "create" ? "content.block.create" : "content.block.edit";
+    const authorizationExpectation = {
+      provider: proposal.provider,
+      websiteId: input.website_id,
+      pageId: input.page_id,
+      action: proposal.action,
+      targetResource: proposal.targetResource,
+      payload: proposal.payload,
+    };
+    const context: BrowserExecutionContext = execution ?? new ExecutionController({ timeoutMs: 180_000, maxBrowserActions: 100 });
+    const ownedController = execution ? undefined : context as ExecutionController;
+    let activeEditorFrame: Frame | undefined;
+    let activeBlockId = input.block_id ?? "";
+    try {
+      const run = (): Promise<NativeTextBlockResult> => withBrowserExecutionContext(context, async (): Promise<NativeTextBlockResult> => {
+      this.approval.assertAuthorized({ scope: operationScope, ...authorizationExpectation });
+      this.approval.assertAuthorized({ scope: "content.save", ...authorizationExpectation });
+      const initial = await this.pages.inspectPageSections(input.website_id, input.page_id);
+      const targetSections = initial.sections.filter((section) => section.id === input.section_id);
+      if (initial.sectionsTruncated || targetSections.length !== 1 || initial.sections.some((section) =>
+        section.blocksTruncated || section.textTruncated || section.blocks.some((block) => block.textTruncated))) {
+        throw new SquarespaceBrowserError(
+          targetSections.length > 1 ? "SECTION_NOT_FOUND" : "WORKFLOW_BASELINE_UNAVAILABLE",
+          "The selected section is missing, ambiguous, or truncated; no editor changes were made.",
+        );
+      }
+      const website = this.browser.getWebsite(input.website_id);
+      this.assertConfirmedWebsite(website);
+      const pageRecord = await this.pages.getPageDetails(input.website_id, input.page_id);
+      const targetUrl = this.assertHomePage(pageRecord, website, input.page_id);
+      const workflowBaseline = (authorization as MutationAuthorization & {
+        baselineFingerprints?: Readonly<Record<string, string>>;
+      } | undefined)?.baselineFingerprints?.[`page:${input.page_id}:section:${input.section_id}`];
+      if (workflowBaseline) {
+        const actualBaseline = createHash("sha256").update(JSON.stringify({
+          websiteId: input.website_id,
+          pageId: input.page_id,
+          url: initial.url,
+          sections: initial.sections,
+        })).digest("hex");
+        if (workflowBaseline !== actualBaseline) {
+          throw new SquarespaceBrowserError(
+            "WORKFLOW_PLAN_MISMATCH",
+            "The page changed after task authorization; replan against the current content before editing.",
+          );
+        }
+      }
+      const originalSection = targetSections[0]!;
+      const originalSections = initial.sections.map((section) => ({
+        ...section,
+        headings: [...section.headings],
+        blocks: section.blocks.map((block) => ({ ...block })),
+      }));
+      const originalBlocks = originalSection.blocks.map((block) => ({ ...block }));
+      if (originalSection.blocks.some((block) => !block.id)) {
+        throw new SquarespaceBrowserError(
+          "WORKFLOW_BASELINE_UNAVAILABLE",
+          "The section contains a block without a stable ID; safe preservation and duplicate detection are unavailable.",
+        );
+      }
+      const existingBlock = input.mode === "edit"
+        ? originalBlocks.find((block) => block.id === input.block_id)
+        : undefined;
+      if (input.mode === "edit" && !existingBlock) {
+        throw new SquarespaceBrowserError("CONTENT_BLOCK_NOT_FOUND", "The requested block is not in the selected section.");
+      }
+      if (existingBlock && !isNativeTextBlock(existingBlock.type, existingBlock.definitionName)) {
+        throw new SquarespaceBrowserError("BLOCK_EDITOR_NOT_AVAILABLE", "The selected block is not identified as a native Text Block.");
+      }
+
+      context.startStage("editor_setup");
+      // Start from the exact, previously resolved page URL so the editor cannot
+      // inherit a page selection left behind by an earlier browser operation.
+      const editorUrl = targetUrl;
+      context.checkpoint();
+      context.beforeBrowserAction();
+      await this.browser.openWebsiteUrl(input.website_id, editorUrl, context);
+      const page = await this.browser.getCurrentPage();
+      await this.assertPageUrl(page, editorUrl);
+      await this.clickOne(page.getByRole("button", { name: "Edit", exact: true }), "Edit", context);
+      await this.waitForEditor(page, context);
+      const frame = await this.findTargetPageFrame(page, targetUrl);
+      activeEditorFrame = frame;
+      const section = frame.locator(`[data-section-id=${cssAttributeValue(input.section_id)}]`);
+      if (await this.inspectCount(section, context) !== 1) {
+        throw new SquarespaceBrowserError("SECTION_NOT_FOUND", "The editor does not expose exactly one selected section ID.");
+      }
+      const initialEditorBlocks = await readEditorBlockIds(section);
+      const expectedIds = originalBlocks.map((block) => block.id!).sort();
+      if (initialEditorBlocks.slice().sort().join("\u0000") !== expectedIds.join("\u0000")) {
+        throw new SquarespaceBrowserError(
+          "WORKFLOW_BASELINE_UNAVAILABLE",
+          `The editor section differs from the inspected page baseline (expected ${expectedIds.length} identified blocks, observed ${initialEditorBlocks.length}).`,
+        );
+      }
+      const editorBaseline = await readEditorBlockSnapshots(section);
+      assertEditorBaseline(editorBaseline, originalBlocks, "The selected editor section differs from the approved content baseline.");
+      context.endStage("editor_setup");
+
+      let blockId = input.block_id ?? "";
+      let block: Locator;
+      if (input.mode === "create") {
+        context.startStage("block_creation");
+        await section.hover();
+        const addBlock = await this.resolveVisibleEnabledControl(section, ADD_BLOCK_CONTROL_SELECTORS, "Add Block", context);
+        await this.clickOne(addBlock, "Add Block", context);
+        const selector = page.getByRole("region", { name: "Block Selector", exact: true });
+        await this.waitForLocator(selector, { state: "visible", timeout: this.timeoutMs }, context);
+        const textOption = selector.getByRole("button", { name: "Text", exact: true });
+        context.beforeBrowserAction();
+        context.markMutationStarted();
+        await this.clickOne(textOption, "Text block", context);
+        await this.waitForLocator(selector, { state: "hidden", timeout: this.timeoutMs }, context);
+        await this.waitForCount(section.locator(BLOCK_SELECTOR), initialEditorBlocks.length + 1, context);
+        const afterInsertIds = await readEditorBlockIds(section);
+        const inserted = afterInsertIds.filter((id) => !initialEditorBlocks.includes(id));
+        if (inserted.length !== 1 || !inserted[0]) {
+          throw new SquarespaceBrowserError("CONTENT_BLOCK_AMBIGUOUS", "Squarespace did not expose exactly one new native block ID after insertion.");
+        }
+        blockId = inserted[0];
+        activeBlockId = blockId;
+        block = section.locator(`[id=${cssAttributeValue(blockId)}][data-block-type]`);
+        if (await this.inspectCount(block, context) !== 1 ||
+          !await block.evaluate((element) => {
+            const name = `${element.getAttribute("data-block-type") ?? ""} ${element.getAttribute("data-definition-name") ?? ""}`;
+            return /(?:^|[.\s_-])text(?:$|[.\s_-])/i.test(name);
+          })) {
+          throw new SquarespaceBrowserError("BLOCK_EDITOR_NOT_AVAILABLE", "The inserted block is not verifiable as a native Text Block.");
+        }
+        context.endStage("block_creation");
+      } else {
+        block = section.locator(`[id=${cssAttributeValue(blockId)}][data-block-type]`);
+        if (await this.inspectCount(block, context) !== 1 ||
+          !await block.evaluate((element) => isTextDefinition(
+            element.getAttribute("data-block-type"),
+            element.getAttribute("data-definition-name"),
+          ))) {
+          throw new SquarespaceBrowserError("CONTENT_BLOCK_AMBIGUOUS", "The selected Text Block ID is not unique in the editor section.");
+        }
+      }
+
+      context.startStage("text_entry");
+      await this.clickOne(block, "Text block", context);
+      await this.clickOne(block.getByRole("button", { name: "Write", exact: true }), "Write", context);
+      const editableCandidates = block.locator('[contenteditable="true"], [role="textbox"], textarea');
+      if (await this.inspectCount(editableCandidates, context) !== 1) {
+        throw new SquarespaceBrowserError("BLOCK_EDITOR_NOT_AVAILABLE", "The Text Block editor did not expose exactly one editable text control.");
+      }
+      const editable = editableCandidates;
+      await this.waitForLocator(editable, { state: "visible", timeout: this.timeoutMs }, context);
+      context.beforeBrowserAction();
+      context.markMutationStarted();
+      const fillOperation = editable.fill(input.text, {
+        timeout: Math.max(1, Math.min(this.timeoutMs, context.remainingMs)),
+      });
+      try {
+        await awaitPlaywrightOperation(fillOperation, context);
+      } catch (error) {
+        if (error instanceof Error && error.name === "TimeoutError") {
+          context.checkpoint();
+          throw new ExecutionStoppedError("browser_operation_timeout", true);
+        }
+        throw error;
+      }
+      const enteredText = await editable.evaluate((element) =>
+        "value" in element ? String((element as HTMLInputElement).value) : (element as HTMLElement).innerText.trim());
+      if (enteredText !== input.text) {
+        throw new SquarespaceBrowserError("TEXT_SECTION_VERIFICATION_FAILED", "The editor did not retain the exact requested text.");
+      }
+      context.endStage("text_entry");
+
+      const beforeSaveEditorState = await readEditorBlockSnapshots(section);
+      assertEditorMutationMatches(beforeSaveEditorState, editorBaseline, blockId, input.text, input.mode);
+      const beforeSavePageState = await readEditorPageSections(frame);
+      assertEditorPageMutationMatches(beforeSavePageState, originalSections, input.section_id, blockId, input.text, input.mode);
+
+      context.startStage("save");
+      const save = await this.pages.savePageChanges(input.website_id, false, undefined, context, {
+        pageId: input.page_id,
+        action: proposal.action,
+        targetResource: proposal.targetResource,
+        payload: proposal.payload,
+      });
+      if (save.published || save.action === "published" || !save.saved) {
+        throw new SquarespaceBrowserError("PAGE_SAVE_FAILED", "Squarespace did not confirm a draft Save without publishing.");
+      }
+      context.endStage("save");
+
+      context.startStage("result_verification");
+      const final = await this.pages.inspectPageSections(input.website_id, input.page_id);
+      const finalSections = final.sections.filter((candidate) => candidate.id === input.section_id);
+      const finalSection = finalSections[0];
+      const finalBlocks = finalSection?.blocks.filter((candidate) => candidate.id === blockId) ?? [];
+      if (final.websiteId !== input.website_id || final.pageId !== input.page_id || final.url !== initial.url ||
+        final.sectionsTruncated || final.sections.length !== originalSections.length ||
+        final.sections.some((section, index) => section.id !== originalSections[index]?.id) ||
+        finalSections.length !== 1 || finalBlocks.length !== 1 ||
+        finalBlocks[0]!.visibleText.trim() !== input.text || finalBlocks[0]!.textTruncated ||
+        !isNativeTextBlock(finalBlocks[0]!.type, finalBlocks[0]!.definitionName)) {
+        throw new SquarespaceBrowserError("TEXT_SECTION_VERIFICATION_FAILED", "Fresh page inspection did not confirm the saved Text Block and exact content.");
+      }
+      for (const beforeSection of originalSections) {
+        const afterSection = final.sections.find((candidate) => candidate.id === beforeSection.id);
+        if (!afterSection) {
+          throw new SquarespaceBrowserError("TEXT_SECTION_VERIFICATION_FAILED", "Save changed or removed an unrelated page section.");
+        }
+        if (beforeSection.id !== input.section_id && JSON.stringify(afterSection) !== JSON.stringify(beforeSection)) {
+          throw new SquarespaceBrowserError("TEXT_SECTION_VERIFICATION_FAILED", "Save changed unrelated page content.");
+        }
+      }
+      if (input.mode === "edit") {
+        const unchanged = originalBlocks.filter((candidate) => candidate.id !== blockId);
+        if (finalSection!.blocks.length !== originalBlocks.length ||
+          finalSection!.blocks.map((block) => block.id).join("\u0000") !== originalBlocks.map((block) => block.id).join("\u0000") ||
+          unchanged.some((before) => {
+          const after = finalSection!.blocks.find((candidate) => candidate.id === before.id);
+          return !after || after.type !== before.type || after.definitionName !== before.definitionName || after.visibleText !== before.visibleText;
+        })) {
+          throw new SquarespaceBrowserError("TEXT_SECTION_VERIFICATION_FAILED", "Editing the Text Block changed unrelated section content.");
+        }
+      } else {
+        const newBlockIds = finalSection!.blocks.map((candidate) => candidate.id).filter(Boolean);
+        if (finalSection!.blocks.length !== originalBlocks.length + 1 ||
+          originalBlocks.some((before) => !newBlockIds.includes(before.id)) ||
+          finalSection!.blocks.filter((candidate) => candidate.id !== blockId).map((candidate) => candidate.id).join("\u0000") !==
+            originalBlocks.map((candidate) => candidate.id).join("\u0000")) {
+          throw new SquarespaceBrowserError("TEXT_SECTION_VERIFICATION_FAILED", "Creating the Text Block changed unrelated section content.");
+        }
+      }
+      context.endStage("result_verification");
+      context.markMutationVerified();
+      const result = {
+        websiteId: input.website_id,
+        pageId: input.page_id,
+        sectionId: input.section_id,
+        blockId,
+        mode: input.mode,
+        text: input.text,
+        saved: true as const,
+        published: false as const,
+        verified: true as const,
+        saveAction: save.action as "saved" | "already_saved",
+      };
+      ownedController?.finish("succeeded");
+      return result;
+      });
+      return await (authorization && !this.approval.hasActiveAuthorization()
+        ? this.approval.runAuthorized(authorization.proposal, authorization.receipt, run)
+        : run());
+    } catch (error) {
+      if (ownedController) ownedController.finish(error instanceof ExecutionStoppedError ? "interrupted" : "failed");
+      if (context.mutationOutcomeUncertain && !(error instanceof ExecutionStoppedError && error.mutationOutcomeUncertain)) {
+        let observedEditorTarget = "editor state could not be re-inspected";
+        if (activeEditorFrame) {
+          try {
+            const sections = await readEditorPageSections(activeEditorFrame);
+            const section = sections.find((candidate) => candidate.id === input.section_id);
+            const target = section?.blocks.filter((candidate) => candidate.id === activeBlockId) ?? [];
+            observedEditorTarget = target.length === 1
+              ? `editor re-inspection observed target ${target[0]!.id} with text length ${target[0]!.text.length}`
+              : "editor re-inspection could not uniquely identify the target block";
+          } catch {
+            // Keep the operation uncertain if browser/editor inspection is unavailable.
+          }
+        }
+        throw new SquarespaceBrowserError(
+          "OUTCOME_UNCERTAIN",
+          `The Text Block operation may have partially changed the editor or CMS. Its outcome is uncertain; ${observedEditorTarget}. Do not retry until the page and editor state are reviewed.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    } finally {
+      if (ownedController) {
+        this.approval.revoke(
+          authorization?.proposal.action === "workflow.execute" ? undefined : authorization?.receipt,
+        );
+      }
     }
   }
 
@@ -424,27 +757,14 @@ export class SquarespaceContentService {
   }
 
   private assertConfirmedWebsite(website: WebsiteSummary): void {
-    const url = new URL(website.url);
-    if (process.env.ALLOW_ANY_SQUARESPACE_SITE === "true") {
-      if (
-        url.protocol !== "https:" ||
-        (!url.hostname.endsWith(".squarespace.com") && !url.hostname.includes("squarespace"))
-      ) {
-        throw new SquarespaceBrowserError(
-          "TEXT_SECTION_TARGET_MISMATCH",
-          "Target website must be an authorized Squarespace website.",
-        );
-      }
-      return;
+    let url: URL;
+    try { url = new URL(website.url); } catch {
+      throw new SquarespaceBrowserError("TEXT_SECTION_TARGET_MISMATCH", "Target website URL is invalid.");
     }
-    if (
-      website.name !== "Kausar Mia" ||
-      url.protocol !== "https:" ||
-      url.hostname !== CONFIRMED_WEBSITE_HOST
-    ) {
+    if (url.protocol !== "https:") {
       throw new SquarespaceBrowserError(
         "TEXT_SECTION_TARGET_MISMATCH",
-        "add_text_section is restricted to the confirmed Kausar Mia Squarespace website.",
+        "Target website must be a verified HTTPS site from the authenticated Squarespace account.",
       );
     }
   }
@@ -456,25 +776,23 @@ export class SquarespaceContentService {
   ): string {
     if (
       page.id !== expectedPageId ||
-      (process.env.ALLOW_ANY_SQUARESPACE_PAGE !== "true" && page.name.toLowerCase() !== "home") ||
       page.type !== "page" ||
       !page.url
     ) {
       throw new SquarespaceBrowserError(
         "TEXT_SECTION_TARGET_MISMATCH",
-        "The selected page ID is not the Home page.",
+        "The selected page ID is not a page on the selected website.",
       );
     }
     const target = new URL(page.url);
     const origin = new URL(website.url).origin;
     if (
       target.origin !== origin ||
-      (process.env.ALLOW_ANY_SQUARESPACE_PAGE !== "true" && target.pathname !== "/") ||
       page.websiteId !== website.id
     ) {
       throw new SquarespaceBrowserError(
         "TEXT_SECTION_TARGET_MISMATCH",
-        "The selected Home page URL does not match the confirmed website root.",
+        "The selected page URL does not belong to the selected website.",
       );
     }
     target.search = "";
@@ -489,20 +807,46 @@ export class SquarespaceContentService {
     homeUrl: string,
   ): void {
     if (
-      (process.env.ALLOW_ANY_SQUARESPACE_SITE !== "true" && snapshot.website.name !== website.name) ||
       new URL(snapshot.website.url).origin !== new URL(website.url).origin ||
       snapshot.page.id !== homePage.id ||
       snapshot.page.websiteId !== website.id ||
-      (process.env.ALLOW_ANY_SQUARESPACE_PAGE !== "true" && snapshot.page.name !== homePage.name) ||
+      snapshot.page.websiteId !== website.id ||
       snapshot.pageUrl !== homeUrl ||
       !snapshot.screenshots.some((screenshot) =>
         screenshot.kind === "full_page" && screenshot.status === "captured")
     ) {
       throw new SquarespaceBrowserError(
         "SNAPSHOT_VERIFICATION_FAILED",
-        "The verified backup does not contain a full-page screenshot for the confirmed Home page.",
+        "The verified backup does not match the selected website and page.",
       );
     }
+  }
+
+  private async findTargetPageFrame(page: Page, targetUrl: string): Promise<Frame> {
+    const target = new URL(targetUrl);
+    const matchesTarget = (candidate: Frame): boolean => {
+      try {
+        const actual = new URL(candidate.url());
+        return actual.origin === target.origin && normalizePath(actual.pathname) === normalizePath(target.pathname);
+      } catch {
+        return false;
+      }
+    };
+    const siteFrame = page.locator(SITE_FRAME_SELECTOR);
+    const siteFrameCount = await this.inspectCount(siteFrame);
+    if (siteFrameCount > 1) {
+      throw new SquarespaceBrowserError("TEXT_SECTION_TARGET_MISMATCH", "Multiple site editor frames are present; page identity is ambiguous.");
+    }
+    if (siteFrameCount === 1) {
+      const element = await siteFrame.elementHandle();
+      const frame = element ? await element.contentFrame() : null;
+      if (frame && matchesTarget(frame) && await frame.locator(SECTION_SELECTOR).count() > 0) return frame;
+    }
+    const matchingFrames = page.frames().filter(matchesTarget);
+    if (matchingFrames.length !== 1 || await matchingFrames[0]!.locator(SECTION_SELECTOR).count() === 0) {
+      throw new SquarespaceBrowserError("SECTIONS_NOT_AVAILABLE", "The editor did not expose the exact inspected page URL.");
+    }
+    return matchingFrames[0]!;
   }
 
   private async assertPageUrl(page: Page, expectedUrl: string): Promise<void> {
@@ -567,22 +911,17 @@ export class SquarespaceContentService {
   }
 
   private async resolveVisibleEnabledControl(
-    page: Page,
+    scope: Page | Locator,
     selectors: string[],
     controlName: string,
     execution?: BrowserExecutionContext,
   ): Promise<Locator> {
-    for (const selector of selectors) {
-      const control = page.locator(`${selector}:visible`).first();
-      if ((await this.inspectCount(control, execution)) !== 1) {
-        continue;
-      }
-      if (await control.isDisabled()) {
-        continue;
-      }
-      return control;
+    const control = scope.locator(selectors.map((selector) => `${selector}:visible`).join(","));
+    const count = await this.inspectCount(control, execution);
+    if (count !== 1 || !(await control.isEnabled())) {
+      throw this.editorError(`The selected editor scope did not expose exactly one enabled ${controlName} control (found ${count}).`);
     }
-    throw this.editorError(`The Home editor did not expose one enabled ${controlName} control.`);
+    return control;
   }
 
   private async applyBlackTextColor(
@@ -689,8 +1028,9 @@ export class SquarespaceContentService {
           execution,
         );
       }
-      if (await this.inspectCount(locator, execution) !== expectedCount) {
-        throw this.editorError("Squarespace created an unexpected number of sections or Text blocks.");
+      const observedCount = await this.inspectCount(locator, execution);
+      if (observedCount !== expectedCount) {
+        throw this.editorError(`Squarespace exposed ${observedCount} sections or Text blocks; expected ${expectedCount}.`);
       }
     } catch (error) {
       if (error instanceof ExecutionStoppedError) throw error;
@@ -768,4 +1108,145 @@ export class SquarespaceContentService {
   private editorError(message: string): SquarespaceBrowserError {
     return new SquarespaceBrowserError("TEXT_SECTION_EDITOR_UNAVAILABLE", message);
   }
+}
+
+function cssAttributeValue(value: string): string {
+  return JSON.stringify(value);
+}
+
+function normalizePath(path: string): string {
+  return path === "/" ? "/" : `/${path.replace(/^\/+|\/+$/g, "")}`;
+}
+
+async function readEditorBlockIds(section: Locator): Promise<string[]> {
+  const ids = await section.locator(BLOCK_SELECTOR).evaluateAll((blocks) =>
+    blocks.map((block) => block.getAttribute("id")),
+  );
+  if (ids.some((id) => !id)) {
+    throw new SquarespaceBrowserError(
+      "WORKFLOW_BASELINE_UNAVAILABLE",
+      "The rendered section contains a block without a stable native ID.",
+    );
+  }
+  return ids as string[];
+}
+
+interface EditorBlockSnapshot {
+  id: string;
+  type: string | null;
+  definitionName: string | null;
+  text: string;
+}
+
+async function readEditorBlockSnapshots(section: Locator): Promise<EditorBlockSnapshot[]> {
+  const blocks = await section.locator(BLOCK_SELECTOR).evaluateAll((elements) =>
+    elements.map((element) => ({
+      id: element.getAttribute("id") ?? "",
+      type: element.getAttribute("data-block-type"),
+      definitionName: element.getAttribute("data-definition-name"),
+      text: (element as HTMLElement).innerText.trim(),
+    })),
+  );
+  if (blocks.some((block) => !block.id) || new Set(blocks.map((block) => block.id)).size !== blocks.length) {
+    throw new SquarespaceBrowserError(
+      "WORKFLOW_BASELINE_UNAVAILABLE",
+      "The editor section contains missing or duplicate block IDs; safe baseline validation is unavailable.",
+    );
+  }
+  return blocks;
+}
+
+async function readEditorPageSections(frame: Frame): Promise<Array<{ id: string; blocks: EditorBlockSnapshot[] }>> {
+  const sections = await frame.locator(SECTION_SELECTOR).evaluateAll((elements) =>
+    elements.map((element) => ({
+      id: element.getAttribute("data-section-id") ?? "",
+      blocks: Array.from(element.querySelectorAll<HTMLElement>(BLOCK_SELECTOR)).map((block) => ({
+        id: block.getAttribute("id") ?? "",
+        type: block.getAttribute("data-block-type"),
+        definitionName: block.getAttribute("data-definition-name"),
+        text: block.innerText.trim(),
+      })),
+    })),
+  );
+  if (sections.some((section) => !section.id || section.blocks.some((block) => !block.id)) ||
+    new Set(sections.map((section) => section.id)).size !== sections.length) {
+    throw new SquarespaceBrowserError("WORKFLOW_BASELINE_UNAVAILABLE", "The editor page no longer exposes stable section and block identifiers.");
+  }
+  return sections;
+}
+
+function assertEditorPageMutationMatches(
+  actual: Array<{ id: string; blocks: EditorBlockSnapshot[] }>,
+  baseline: Array<{ id: string | null; blocks: Array<{ id: string | null; type: string | null; definitionName?: string | null; visibleText: string }> }>,
+  targetSectionId: string,
+  targetBlockId: string,
+  expectedText: string,
+  mode: "create" | "edit",
+): void {
+  if (actual.length !== baseline.length || baseline.some((section) => {
+    if (!section.id) return true;
+    const current = actual.find((candidate) => candidate.id === section.id);
+    if (!current) return true;
+    const targetSection = section.id === targetSectionId;
+    const originalBlocks = section.blocks;
+    if (!targetSection) {
+      return current.blocks.length !== originalBlocks.length || originalBlocks.some((before) => {
+        const after = current.blocks.find((block) => block.id === before.id);
+        return !after || after.type !== before.type || after.definitionName !== (before.definitionName ?? null) ||
+          after.text !== before.visibleText.trim();
+      });
+    }
+    const target = current.blocks.filter((block) => block.id === targetBlockId);
+    if (target.length !== 1 || !isNativeTextBlock(target[0]!.type, target[0]!.definitionName) || target[0]!.text !== expectedText) return true;
+    const unchanged = originalBlocks.filter((block) => mode === "create" || block.id !== targetBlockId);
+    return current.blocks.length !== unchanged.length + 1 || unchanged.some((before) => {
+      const after = current.blocks.find((block) => block.id === before.id);
+      return !after || after.type !== before.type || after.definitionName !== (before.definitionName ?? null) ||
+        after.text !== before.visibleText.trim();
+    });
+  })) {
+    throw new SquarespaceBrowserError("WORKFLOW_PLAN_MISMATCH", "Page content changed after authorization; no Save was attempted.");
+  }
+}
+
+function assertEditorBaseline(
+  actual: EditorBlockSnapshot[],
+  expected: Array<{ id?: string | null; type: string | null; definitionName?: string | null; visibleText: string }>,
+  message: string,
+): void {
+  if (actual.length !== expected.length || expected.some((before) => {
+    const current = actual.find((block) => block.id === before.id);
+    return !current || current.type !== before.type ||
+      current.definitionName !== (before.definitionName ?? null) || current.text !== before.visibleText.trim();
+  })) {
+    throw new SquarespaceBrowserError("WORKFLOW_PLAN_MISMATCH", message);
+  }
+}
+
+function assertEditorMutationMatches(
+  actual: EditorBlockSnapshot[],
+  baseline: EditorBlockSnapshot[],
+  targetBlockId: string,
+  expectedText: string,
+  mode: "create" | "edit",
+): void {
+  const target = actual.filter((block) => block.id === targetBlockId);
+  if (target.length !== 1 || !isNativeTextBlock(target[0]!.type, target[0]!.definitionName) || target[0]!.text !== expectedText) {
+    throw new SquarespaceBrowserError("WORKFLOW_PLAN_MISMATCH", "The intended native Text Block changed before Save.");
+  }
+  const expectedUnchanged = baseline.filter((block) => mode === "create" || block.id !== targetBlockId);
+  if (actual.length !== expectedUnchanged.length + 1 || expectedUnchanged.some((before) => {
+    const after = actual.find((block) => block.id === before.id);
+    return !after || after.type !== before.type || after.definitionName !== before.definitionName || after.text !== before.text;
+  })) {
+    throw new SquarespaceBrowserError("WORKFLOW_PLAN_MISMATCH", "Unrelated section content changed before Save; the operation was stopped.");
+  }
+}
+
+function isNativeTextBlock(type: string | null, definitionName: string | null | undefined): boolean {
+  return isTextDefinition(type, definitionName);
+}
+
+function isTextDefinition(type: string | null, definitionName: string | null | undefined): boolean {
+  return /(?:^|[.\s_-])text(?:$|[.\s_-])/i.test(`${type ?? ""} ${definitionName ?? ""}`);
 }
