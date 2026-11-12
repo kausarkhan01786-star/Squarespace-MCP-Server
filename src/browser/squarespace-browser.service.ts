@@ -116,6 +116,8 @@ export class SquarespaceBrowserService {
   private contextGenerationId: string | undefined;
   private launchPromise: Promise<void> | undefined;
   private pagePromise: Promise<Page> | undefined;
+  private closePromise: Promise<void> | undefined;
+  private closingContext: BrowserContext | undefined;
   private profileLeaseRelease: (() => Promise<void>) | undefined;
   private leaseReleasePromise: Promise<void> | undefined;
   private navigationCancellation: Promise<void> | undefined;
@@ -447,22 +449,43 @@ export class SquarespaceBrowserService {
     }
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (!this.closePromise) {
+      const closing = this.closeOnce();
+      this.closePromise = closing;
+      void closing.catch(() => {
+        if (this.closePromise === closing) this.closePromise = undefined;
+      });
+    }
+    return this.closePromise;
+  }
+
+  private async closeOnce(): Promise<void> {
     await this.launchPromise?.catch(() => undefined);
     await this.pagePromise?.catch(() => undefined);
     const context = this.context;
-    this.context = undefined;
-    this.page = undefined;
-    this.contextGenerationId = undefined;
-    this.websiteDestinations.clear();
 
     if (context) {
+      this.closingContext = context;
       try {
         await context.close();
+      } catch (error) {
+        // Keep the context and lease intact so a later close() can retry safely.
+        throw error;
       } finally {
+        this.closingContext = undefined;
+      }
+      if (this.context === context) {
+        this.context = undefined;
+        this.page = undefined;
+        this.contextGenerationId = undefined;
+        this.websiteDestinations.clear();
         await this.releaseBrowserProfileLease();
       }
     } else {
+      this.page = undefined;
+      this.contextGenerationId = undefined;
+      this.websiteDestinations.clear();
       await this.releaseBrowserProfileLease();
     }
   }
@@ -547,6 +570,7 @@ export class SquarespaceBrowserService {
       this.contextGenerationId = randomUUID();
       context.on("close", () => {
         if (this.context === context) {
+          if (this.closingContext === context) return;
           this.context = undefined;
           this.page = undefined;
           this.contextGenerationId = undefined;

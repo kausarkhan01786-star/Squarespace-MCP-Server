@@ -167,6 +167,42 @@ test("separate MCP service instances cannot launch against the same profile conc
   await second.close();
 });
 
+test("a failed context close retains profile ownership until a later close succeeds", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "squarespace-browser-close-retry-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const profileDirectory = join(root, "profile");
+  const context = fakeContext();
+  const closeNormally = context.close.bind(context);
+  let failClose = true;
+  let closeAttempts = 0;
+  (context as unknown as { close(): Promise<void> }).close = async () => {
+    closeAttempts += 1;
+    if (failClose) throw new Error("synthetic context close failure");
+    await closeNormally();
+  };
+  const first = new SquarespaceBrowserService({
+    profileDirectory,
+    launchPersistentContext: async () => context,
+  });
+  let secondLaunchCount = 0;
+  const second = new SquarespaceBrowserService({
+    profileDirectory,
+    launchPersistentContext: async () => { secondLaunchCount += 1; return fakeContext(); },
+  });
+
+  await first.getCurrentPage();
+  await assert.rejects(first.close(), /synthetic context close failure/);
+  await assert.rejects(second.getCurrentPage(), { code: "BROWSER_PROFILE_IN_USE" });
+  assert.equal(secondLaunchCount, 0);
+
+  failClose = false;
+  await first.close();
+  assert.equal(closeAttempts, 2);
+  await second.getCurrentPage();
+  assert.equal(secondLaunchCount, 1);
+  await second.close();
+});
+
 test("keeps browser launch failures distinct from authentication outcomes", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "squarespace-browser-launch-failure-"));
   t.after(async () => rm(root, { recursive: true, force: true }));

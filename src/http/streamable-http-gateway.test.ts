@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { SquarespaceBrowserService } from "../browser/squarespace-browser.service.js";
 import { SharedBrowserRuntime } from "../runtime/shared-browser-runtime.js";
@@ -72,6 +74,16 @@ async function initializeSession(url: string, credential: string): Promise<strin
 }
 
 function rawToolCall(url: string, credential: string, sessionId: string, signal?: AbortSignal) {
+  return rawNamedToolCall(url, credential, sessionId, "list_websites", signal);
+}
+
+function rawNamedToolCall(
+  url: string,
+  credential: string,
+  sessionId: string,
+  name: string,
+  signal?: AbortSignal,
+) {
   return fetch(url, {
     method: "POST",
     signal,
@@ -86,7 +98,7 @@ function rawToolCall(url: string, credential: string, sessionId: string, signal?
       jsonrpc: "2.0",
       id: randomRequestId++,
       method: "tools/call",
-      params: { name: "list_websites", arguments: {} },
+      params: { name, arguments: {} },
     }),
   });
 }
@@ -103,6 +115,110 @@ function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
     };
     poll();
   });
+}
+
+function requireSignal<T>(signal: Promise<T>, label: string, timeoutMs = 2_000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    signal,
+    new Promise<T>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}.`)), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function createFakeNativeTextEditor(onInsert: () => Promise<void>) {
+  const state = { inserted: false, text: "" };
+  const records = () => [
+    { id: "existing-image", type: "image", definitionName: "Image", visibleText: "" },
+    ...(state.inserted
+      ? [{ id: "fake-created-block", type: "text", definitionName: "Text", visibleText: state.text }]
+      : []),
+  ];
+  const blockElement = (record: ReturnType<typeof records>[number]) => ({
+    getAttribute: (name: string) => name === "id" ? record.id
+      : name === "data-block-type" ? record.type
+        : name === "data-definition-name" ? record.definitionName
+          : null,
+    innerText: record.visibleText,
+    querySelector: () => ({ innerText: record.visibleText }),
+  });
+  const sectionElement = () => ({
+    getAttribute: (name: string) => name === "data-section-id" ? "section-1" : null,
+    querySelectorAll: () => records().map(blockElement),
+  });
+  const locator = (kind: string): any => ({
+    count: async () => kind === "section" || kind === "pageSections" ? 1
+      : kind === "blocks" ? records().length
+        : kind === "selector" ? Number(!state.inserted)
+          : kind === "block" ? Number(state.inserted)
+            : kind === "none" ? 0
+              : 1,
+    isVisible: async () => true,
+    isEnabled: async () => true,
+    waitFor: async () => {},
+    nth: () => locator(kind),
+    last: () => locator(kind),
+    hover: async () => {},
+    click: async () => {
+      if (kind === "textOption") {
+        await onInsert();
+        state.inserted = true;
+      }
+    },
+    fill: async (text: string) => { state.text = text; },
+    press: async () => {},
+    evaluate: async (fn: (element: any) => unknown) => {
+      if (kind === "editable") return fn({ value: state.text, innerText: state.text });
+      const record = records().at(-1)!;
+      return fn(blockElement(record));
+    },
+    evaluateAll: async (fn: (elements: any[]) => unknown) => fn(
+      kind === "blocks" ? records().map(blockElement)
+        : kind === "pageSections" ? [sectionElement()]
+          : [],
+    ),
+    locator: (selector: string) => {
+      if (selector === "[data-block-type]") return locator("blocks");
+      if (selector.includes("contenteditable") || selector.includes('role="textbox"') || selector.includes("textarea")) {
+        return locator("editable");
+      }
+      if (selector.includes("data-section-id")) return locator("section");
+      if (selector.includes("fake-created-block")) return locator("block");
+      if (selector.includes("Add Block")) return locator("add");
+      return locator("other");
+    },
+    getByRole: (_role: string, args: { name: string }) => {
+      if (args.name === "Block Selector") return locator("selector");
+      if (args.name === "Text") return locator("textOption");
+      if (args.name === "Write") return locator("write");
+      return locator("other");
+    },
+  });
+  const frame = {
+    url: () => "https://fixture.squarespace.com/page-1",
+    locator: (selector: string) => selector === '[data-test="page-section"]'
+      ? locator("pageSections")
+      : locator("section"),
+  };
+  const page = {
+    url: () => "https://fixture.squarespace.com/page-1",
+    frames: () => [frame],
+    isClosed: () => false,
+    locator: (selector: string) => selector.includes("sqs-site-frame")
+      ? locator("none")
+      : selector.includes("Save") || selector.includes("Exit")
+        ? locator("control")
+        : locator("other"),
+    getByRole: (_role: string, args: { name: string }) =>
+      args.name === "Edit" ? locator("control")
+        : args.name === "Block Selector" ? locator("selector")
+          : locator("other"),
+    getByText: () => ({ first: () => ({ waitFor: async () => { throw new Error("No preview banner in fixture."); } }) }),
+  };
+  return { state, page };
 }
 
 function requestWithHost(url: string, host: string, credential: string): Promise<number> {
@@ -230,6 +346,251 @@ test("DELETE terminates one session while an ordinary request disconnect does no
     await gateway.close();
   }
   assert.equal(closeCount(), 1);
+});
+
+test("DELETE drains an active add_text_block workflow mutation before closing once", async () => {
+  let releaseMutation!: () => void;
+  let signalMutationStarted!: () => void;
+  const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+  const mutationStarted = new Promise<void>((resolve) => { signalMutationStarted = resolve; });
+  const fakeWebsite = {
+    id: "fixture-site",
+    name: "Isolated fixture website",
+    url: "https://fixture.squarespace.com",
+  };
+  const fakeEditor = createFakeNativeTextEditor(async () => {
+    signalMutationStarted();
+    await mutationGate;
+  });
+  const { runtime } = runtimeFixture({
+    getWebsite: () => fakeWebsite,
+    openWebsiteUrl: async () => {},
+    getCurrentPage: async () => fakeEditor.page,
+  });
+  const { security, clientA } = securityFixture();
+  const gateway = new StreamableHttpGateway({ runtime, security });
+  const url = await gateway.start();
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: { headers: { authorization: `Bearer ${clientA.credential}` } },
+  });
+  const client = new Client(
+    { name: "gateway-mutation-fixture-client", version: "1.0.0" },
+    { capabilities: { elicitation: { form: {} } } },
+  );
+  client.setRequestHandler(ElicitRequestSchema, async () => ({
+    action: "accept",
+    content: { approve: true },
+  }));
+  let mutationCall: Promise<unknown> | undefined;
+  try {
+    await client.connect(transport);
+    const sessionId = transport.sessionId;
+    assert.ok(sessionId);
+    const internals = gateway as unknown as {
+      sessions: Map<string, {
+        session: { close(): Promise<void>; workflow: unknown };
+        transport: StreamableHTTPServerTransport;
+        activeRequests: number;
+        closing: boolean;
+      }>;
+    };
+    const entry = internals.sessions.get(sessionId);
+    assert.ok(entry);
+
+    const workflow = entry.session.workflow as {
+      adapters: Map<string, {
+        services: {
+          pages: {
+            inspectPageSections(websiteId: string, pageId: string): Promise<unknown>;
+            getPageDetails(websiteId: string, pageId: string): Promise<unknown>;
+            savePageChanges(...args: unknown[]): Promise<unknown>;
+          };
+        };
+      }>;
+    };
+    const adapter = workflow.adapters.get("squarespace");
+    assert.ok(adapter);
+    adapter.services.pages.inspectPageSections = async () => ({
+      websiteId: fakeWebsite.id,
+      pageId: "page-1",
+      url: `${fakeWebsite.url}/page-1`,
+      sectionsTruncated: false,
+      sections: [{
+        id: "section-1",
+        theme: null,
+        layout: "unknown",
+        headings: [],
+        visibleText: fakeEditor.state.text,
+        textTruncated: false,
+        blocks: [
+          { id: "existing-image", type: "image", definitionName: "Image", visibleText: "", textTruncated: false },
+          ...(fakeEditor.state.inserted ? [{
+            id: "fake-created-block",
+            type: "text",
+            definitionName: "Text",
+            visibleText: fakeEditor.state.text,
+            textTruncated: false,
+          }] : []),
+        ],
+        blocksTruncated: false,
+      }],
+    });
+    adapter.services.pages.getPageDetails = async () => ({
+      id: "page-1",
+      websiteId: fakeWebsite.id,
+      name: "Fixture page",
+      navigationTitle: "Fixture page",
+      type: "page",
+      group: "main_navigation",
+      groupLabel: "Main Navigation",
+      parentId: null,
+      parentPath: [],
+      panelIdentity: { index: 0, rowDomId: null, observedLinks: [] },
+      url: `${fakeWebsite.url}/page-1`,
+      urlEvidence: { source: "pages_panel_href", status: "resolved", observedHrefs: [], settingsSlug: null },
+      visibilityStatus: "enabled",
+      enabled: true,
+      identity: {
+        kind: "native",
+        native_id: "page-1",
+        synthetic_id: null,
+        title: "Fixture page",
+        slug: "page-1",
+        is_homepage: false,
+      },
+    });
+    adapter.services.pages.savePageChanges = async () => ({
+      success: true,
+      saved: true,
+      published: false,
+      action: "saved",
+      screenshots: { before: "fixture-before", after: "fixture-after" },
+      inspection: { before: {}, after: {} },
+    });
+
+    let closeCount = 0;
+    let signalCleanupCompleted!: () => void;
+    const cleanupCompleted = new Promise<void>((resolve) => { signalCleanupCompleted = resolve; });
+    let signalDeleteAdmitted!: () => void;
+    const deleteAdmitted = new Promise<void>((resolve) => { signalDeleteAdmitted = resolve; });
+    let signalDeleteMarked!: () => void;
+    const deleteMarked = new Promise<void>((resolve) => { signalDeleteMarked = resolve; });
+    let deleteTransportCalls = 0;
+    const closeStandaloneSSEStream = entry.transport.closeStandaloneSSEStream.bind(entry.transport);
+    entry.transport.closeStandaloneSSEStream = () => {
+      signalDeleteMarked();
+      closeStandaloneSSEStream();
+    };
+    const handleTransportRequest = entry.transport.handleRequest.bind(entry.transport);
+    entry.transport.handleRequest = async (request, response, parsedBody) => {
+      if (request.method === "DELETE") {
+        deleteTransportCalls += 1;
+        signalDeleteAdmitted();
+      }
+      await handleTransportRequest(request, response, parsedBody);
+    };
+    const closeableSession = entry.session;
+    const closeOriginal = closeableSession.close.bind(closeableSession);
+    (closeableSession as { close(): Promise<void> }).close = async () => {
+      closeCount += 1;
+      try {
+        await closeOriginal();
+      } finally {
+        signalCleanupCompleted();
+      }
+    };
+
+    const brief = {
+      businessType: "Fixture",
+      websiteGoals: ["Test the gateway lifecycle"],
+      targetAudience: ["Test runner"],
+      requiredPages: [{ name: "Page", purpose: "Fixture", sections: [{ name: "Content", goal: "Exercise mutation dispatch" }] }],
+      requiredFeatures: [],
+      contentRequirements: [],
+      designPreferences: [],
+      assetRequirements: [],
+      responsiveRequirements: [],
+      openQuestions: [],
+    };
+    const planResponse = await client.callTool({
+      name: "plan_website_workflow",
+      arguments: {
+        cms: "squarespace",
+        website_id: fakeWebsite.id,
+        brief,
+        tasks: [{
+          action: "add_text_block",
+          page_id: "page-1",
+          section_id: "section-1",
+          text: "Isolated mutation fixture",
+        }],
+      },
+    });
+    assert.equal(planResponse.isError, undefined);
+    const plan = (planResponse.structuredContent as { result: {
+      workflowId: string;
+      fingerprint: string;
+      tasks: Array<{ id: string; action: string; approvalRequired: boolean }>;
+    } }).result;
+    assert.equal(plan.tasks[0]?.action, "add_text_block");
+    assert.equal(plan.tasks[0]?.approvalRequired, true);
+    const approvalResponse = await client.callTool({
+      name: "approve_workflow_tasks",
+      arguments: {
+        workflow_id: plan.workflowId,
+        plan_fingerprint: plan.fingerprint,
+        task_ids: [plan.tasks[0]!.id],
+      },
+    });
+    assert.equal(approvalResponse.isError, undefined);
+
+    mutationCall = client.callTool({
+      name: "execute_website_workflow",
+      arguments: { workflow_id: plan.workflowId, max_tasks: 1 },
+    });
+    await requireSignal(mutationStarted, "the add_text_block mutation boundary");
+    const deleteRequest = () => fetch(url, {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${clientA.credential}`,
+        "mcp-session-id": sessionId,
+        "mcp-protocol-version": "2025-03-26",
+      },
+    });
+    const firstDelete = deleteRequest();
+    await requireSignal(deleteMarked, "session DELETE admission");
+    assert.equal(entry.closing, true);
+    assert.ok(entry.activeRequests >= 2);
+    assert.equal(deleteTransportCalls, 0);
+    assert.equal(gateway.sessionCount, 0);
+    assert.equal(closeCount, 0);
+
+    const rejected = await rawToolCall(url, clientA.credential, sessionId);
+    assert.equal(rejected.status, 404);
+    await rejected.text();
+    assert.equal(closeCount, 0);
+
+    const repeatedDelete = deleteRequest();
+    releaseMutation();
+    assert.ok(mutationCall);
+    const mutationResponse = await mutationCall as { isError?: boolean };
+    assert.equal(mutationResponse.isError, undefined);
+    assert.equal(fakeEditor.state.inserted, true);
+    assert.equal(fakeEditor.state.text, "Isolated mutation fixture");
+    await requireSignal(deleteAdmitted, "DELETE transport admission after mutation completion");
+    const [firstDeleteResponse, repeatedDeleteResponse] = await Promise.all([firstDelete, repeatedDelete]);
+    assert.equal(firstDeleteResponse.status, 200);
+    assert.equal(repeatedDeleteResponse.status, 200);
+    await Promise.all([firstDeleteResponse.text(), repeatedDeleteResponse.text()]);
+    await cleanupCompleted;
+    assert.equal(gateway.sessionCount, 0);
+    assert.equal(closeCount, 1);
+  } finally {
+    releaseMutation();
+    await mutationCall?.catch(() => undefined);
+    await client.close().catch(() => undefined);
+    await gateway.close().catch(() => undefined);
+  }
 });
 
 test("the authorization policy runs for initialization and every later session request", async () => {

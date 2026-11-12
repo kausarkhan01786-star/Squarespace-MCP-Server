@@ -1,3 +1,5 @@
+/// <reference types="node" />
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -32,13 +34,13 @@ test("serializes operations that share a browser page and preserves FIFO order",
   await firstStarted.promise;
 
   const second = lock.runExclusive(async () => {
-    assert.deepEqual(activePageOperations, []);
+    assert.equal(activePageOperations.length, 0);
     activePageOperations.push("second");
     order.push("second");
     activePageOperations.pop();
   });
   const third = lock.runExclusive(async () => {
-    assert.deepEqual(activePageOperations, []);
+    assert.equal(activePageOperations.length, 0);
     activePageOperations.push("third");
     order.push("third");
     activePageOperations.pop();

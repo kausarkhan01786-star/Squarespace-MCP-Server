@@ -14,7 +14,9 @@ interface GatewaySession {
   readonly transport: StreamableHTTPServerTransport;
   lastActivityAt: number;
   activeRequests: number;
+  closing: boolean;
   closePromise?: Promise<void>;
+  cleanupPromise?: Promise<void>;
 }
 
 export interface StreamableHttpGatewayOptions {
@@ -99,7 +101,7 @@ export class StreamableHttpGateway {
   }
 
   get sessionCount(): number {
-    return this.sessions.size;
+    return [...this.sessions.values()].filter((entry) => !entry.closing).length;
   }
 
   get activeRequestCount(): number {
@@ -148,7 +150,7 @@ export class StreamableHttpGateway {
   /** Reaps only idle sessions with no active HTTP request. SSE disconnects alone do not delete a session. */
   async sweepIdleSessions(now = this.now()): Promise<number> {
     const expired = [...this.sessions.values()].filter((entry) =>
-      entry.activeRequests === 0 && now - entry.lastActivityAt >= this.idleSessionTimeoutMs,
+      !entry.closing && entry.activeRequests === 0 && now - entry.lastActivityAt >= this.idleSessionTimeoutMs,
     );
     for (const entry of expired) await this.removeAndCloseSession(entry);
     return expired.length;
@@ -263,10 +265,7 @@ export class StreamableHttpGateway {
         },
         onsessionclosed: (id) => {
           const current = this.sessions.get(id);
-          if (current) {
-            this.sessions.delete(id);
-            this.scheduleSessionClose(current);
-          }
+          if (current) this.beginSessionClose(current);
         },
       });
       const session = createMcpClientSession(this.runtime, transport, {
@@ -279,6 +278,7 @@ export class StreamableHttpGateway {
         transport,
         lastActivityAt: this.now(),
         activeRequests: 0,
+        closing: false,
       };
       await session.server.connect(transport);
       try {
@@ -308,6 +308,14 @@ export class StreamableHttpGateway {
       rejectAndTerminateRequest(request, response, 405, { error: "HTTP method is not supported." });
       return;
     }
+    if (entry.closing) {
+      if (request.method === "DELETE") {
+        sendJson(response, 200, {});
+      } else {
+        rejectAndTerminateRequest(request, response, 404, { error: "MCP session not found." });
+      }
+      return;
+    }
     if (entry.activeRequests >= this.maxActiveRequestsPerSession) {
       rejectAndTerminateRequest(request, response, 429, { error: "MCP session request capacity reached." });
       return;
@@ -315,16 +323,37 @@ export class StreamableHttpGateway {
     try {
       entry.activeRequests += 1;
       entry.lastActivityAt = this.now();
+      // Count DELETE itself before transport.handleRequest can emit onsessionclosed.
+      // That callback marks the session unavailable, but cleanup must wait until
+      // this request and every previously admitted request have settled.
+      if (request.method === "DELETE") {
+        this.beginSessionClose(entry);
+        // A standalone notification SSE stream is not active browser work and
+        // otherwise can keep the session request count non-zero indefinitely.
+        entry.transport.closeStandaloneSSEStream();
+        const requestsDrained = await this.waitForSessionRequestsToDrain(
+          entry,
+          1,
+          this.gracefulDrainTimeoutMs,
+        );
+        if (!requestsDrained) {
+          rejectAndTerminateRequest(request, response, 503, {
+            error: "MCP session cleanup timed out while requests were still active.",
+          });
+          return;
+        }
+      }
       await entry.transport.handleRequest(request, response);
     } finally {
       entry.activeRequests = Math.max(0, entry.activeRequests - 1);
       entry.lastActivityAt = this.now();
+      if (entry.closing) this.beginSessionClose(entry);
     }
   }
 
   private async removeAndCloseSession(entry: GatewaySession): Promise<void> {
-    if (this.sessions.get(entry.id) === entry) this.sessions.delete(entry.id);
-    await this.closeSession(entry);
+    this.beginSessionClose(entry);
+    await entry.cleanupPromise;
   }
 
   private closeSession(entry: GatewaySession): Promise<void> {
@@ -332,17 +361,30 @@ export class StreamableHttpGateway {
     return entry.closePromise;
   }
 
-  private scheduleSessionClose(entry: GatewaySession): void {
+  /** Marks a session unavailable immediately, then closes it only after every admitted request has settled. */
+  private beginSessionClose(entry: GatewaySession): void {
+    entry.closing = true;
+    entry.lastActivityAt = this.now();
+    if (entry.activeRequests !== 0 || entry.cleanupPromise) return;
+
     let tracked: Promise<void>;
-    tracked = new Promise<void>((resolve) => {
+    tracked = new Promise<void>((resolve, reject) => {
       setImmediate(() => {
-        void this.closeSession(entry).catch(() => undefined).finally(() => {
-          this.pendingSessionClosures.delete(tracked);
-          resolve();
-        });
+        void this.closeSession(entry).then(
+          () => {
+            if (this.sessions.get(entry.id) === entry) this.sessions.delete(entry.id);
+            resolve();
+          },
+          reject,
+        );
       });
     });
+    entry.cleanupPromise = tracked;
     this.pendingSessionClosures.add(tracked);
+    void tracked.then(
+      () => this.pendingSessionClosures.delete(tracked),
+      () => this.pendingSessionClosures.delete(tracked),
+    );
   }
 
   private async closeGateway(): Promise<void> {
@@ -406,6 +448,20 @@ export class StreamableHttpGateway {
       sessions.some((entry) => entry.activeRequests > 0) ||
       !this.runtime.operationLock.isIdle
     ) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await delay(Math.min(remaining, 20));
+    }
+    return true;
+  }
+
+  private async waitForSessionRequestsToDrain(
+    entry: GatewaySession,
+    activeRequestsToAllow: number,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (entry.activeRequests > activeRequestsToAllow) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return false;
       await delay(Math.min(remaining, 20));
