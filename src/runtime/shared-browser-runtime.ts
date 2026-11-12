@@ -24,7 +24,11 @@ export class SharedBrowserRuntime {
   /** Only the process that created this runtime may call shutdown. */
   shutdown(): Promise<void> {
     if (!this.shutdownPromise) {
-      this.shutdownPromise = this.operationLock.runExclusive(() => this.browser.close());
+      const current = this.operationLock.runExclusive(() => this.browser.close());
+      this.shutdownPromise = current;
+      void current.catch(() => {
+        if (this.shutdownPromise === current) this.shutdownPromise = undefined;
+      });
     }
     return this.shutdownPromise;
   }
