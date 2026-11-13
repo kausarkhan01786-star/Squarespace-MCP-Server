@@ -11,7 +11,9 @@
             "VCCLCompilerTool": {
               "ExceptionHandling": 0
             }
-          }
+          },
+          "cflags=": [],
+          "ldflags=": []
         }]
       ]
     }
