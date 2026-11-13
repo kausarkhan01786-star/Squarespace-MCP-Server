@@ -1,4 +1,4 @@
-import { SquarespaceBrowserService, type SquarespaceBrowserOptions } from "../browser/squarespace-browser.service.js";
+﻿import { SquarespaceBrowserService, type SquarespaceBrowserOptions } from "../browser/squarespace-browser.service.js";
 import { BrowserProfileOwnership } from "../browser/browser-profile-ownership.js";
 import { resolveProfileDirectory } from "../browser/browser-security.js";
 import { logInfo } from "../utils/logger.js";

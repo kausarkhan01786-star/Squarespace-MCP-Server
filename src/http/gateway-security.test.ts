@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Focused regression tests for GatewaySecurity (Phase 3C.3).
  *
  * Tests:

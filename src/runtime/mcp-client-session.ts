@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+﻿import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { MutationApprovalGuard } from "../approval/mutation-approval.js";
 import { McpHumanApprovalPrompt } from "../approval/mcp-human-approval.js";
 import { PageBackupService } from "../backups/page-backup.service.js";
@@ -121,7 +122,7 @@ export class McpClientSession {
     registerPagesTools(this.server, pages, backups, lock);
     registerDesignTools(this.server, design, lock);
     registerContentTools(this.server, content, lock);
-    registerCommerceTools(this.server, commerce);
+    registerCommerceTools(this.server, commerce, lock);
     registerNavigationSeoSettingsTools(this.server, navigationSeoSettings, lock);
     registerSettingsChangePlanningTools(this.server, settingsChangePlanner, lock);
     registerSettingsExecutionTools(this.server, settingsExecution, lock);
@@ -138,4 +139,23 @@ export class McpClientSession {
       // Ignore cleanup error on session close
     }
   }
+}
+
+/**
+ * Creates an isolated MCP client session over a shared browser runtime.
+ * A default operation lock is created when none is supplied, so callers
+ * that only need a runtime + transport (e.g. stdio composition) can omit it.
+ */
+export function createMcpClientSession(
+  runtime: SharedBrowserRuntime,
+  transport: Transport,
+  options: { serverName?: string | undefined; serverVersion?: string | undefined } = {},
+): McpClientSession {
+  void transport; // transport is bound by the caller via session.server.connect(transport)
+  return new McpClientSession({
+    sharedRuntime: runtime,
+    operationLock: new BrowserOperationLock(),
+    serverName: options.serverName,
+    serverVersion: options.serverVersion,
+  });
 }

@@ -206,7 +206,9 @@ test("every registry operation status is reconciled against every descriptor sup
   }
 });
 
-test("partially implemented aggregate permits mixed operation statuses without promotion", () => {
+test("PARTIALLY_IMPLEMENTED aggregate with mixed implemented/unimplemented operations stays ineligible for adapter route", () => {
+  // A partially implemented aggregate with both implemented and not implemented ops must remain ineligible.
+
   const result = normalizeCapabilities(
     registryWith({ aggregateStatus: "PARTIALLY_IMPLEMENTED", operationStatus: "IMPLEMENTED_AND_TESTED" }),
     "squarespace",
@@ -235,7 +237,9 @@ test("contradictory non-partial aggregate and operation statuses fail closed", (
     conflict.code === "registry_aggregate_operation_mismatch"));
 });
 
-test("partial aggregate with no implemented operation is inconsistent", () => {
+test("PARTIALLY_IMPLEMENTED aggregate with no implemented operations is inconsistent and ineligible", () => {
+  // A partially implemented aggregate with all NOT_IMPLEMENTED ops must be flagged as inconsistent/ineligible.
+
   const result = normalizeCapabilities(
     registryWith({
       aggregateStatus: "PARTIALLY_IMPLEMENTED",
@@ -485,6 +489,29 @@ test("independent verification requires trusted evidence scoped to the exact ope
     error.code === "trusted_verifier_not_integrated"));
 });
 
+test("Regression: adapterRouteEligible is never granted by caller-provided trust policy, values, or extra arguments", () => {
+  // Callers cannot force eligibility by supplying trust/evidence/context/time/site/hash/vars, nor override registry restrictions.
+  const forgedCallerInputs = {
+    evidencePolicy: trustedPolicy,
+    eligibilityContext: {
+      grantedPermissions: ["pages.write"],
+      humanApprovalGranted: true,
+      policyAuthorized: true,
+      verificationCompleted: true,
+    },
+    now: new Date("2099-01-01T00:00:00.000Z"),
+    siteIdentityHash: "a".repeat(64),
+    extra: "not_allowed"
+  };
+  const result = Reflect.apply(normalizeDeclarationSet, undefined, [
+    registryWith(), "squarespace", declaration(), forgedCallerInputs,
+  ]) as ReturnType<typeof normalizeDeclarationSet>;
+  const view = viewFor(result);
+  assert.equal(view.adapterRouteEligible, false);
+  assert.ok(view.reasonCodes.includes("trusted_verifier_not_integrated"));
+  assert.ok(view.reasonCodes.includes("trusted_permission_provider_not_integrated"));
+  assert.ok(view.reasonCodes.includes("trusted_approval_receipt_not_integrated"));
+});
 test("caller-provided trust policy, grants, approvals, verification, time, and site hash cannot authorize", () => {
   const forgedCallerInputs = {
     evidencePolicy: trustedPolicy,
@@ -508,6 +535,26 @@ test("caller-provided trust policy, grants, approvals, verification, time, and s
   assert.ok(view.reasonCodes.includes("trusted_permission_provider_not_integrated"));
   assert.ok(view.reasonCodes.includes("trusted_approval_receipt_not_integrated"));
   assert.equal(normalizeDeclarationSet.length, 3);
+});
+
+test("Unapproved live, superseded, and conflicted evidence never establish independent verification", () => {
+  // All these evidence types must not allow independent verification or adapter route.
+  const states = [
+    evidence({ reviewStatus: "pending", validity: "pending", reviewedAt: null }), // unapproved
+    evidence({ validity: "superseded" }),
+    evidence({ validity: "conflict" }),
+  ];
+  for (const ev of states) {
+    const result = normalizeCapabilities(
+      registryWith(),
+      "squarespace",
+      declaration([descriptor({ verification: "independently_verified", evidence: [ev] })]),
+      options(),
+    );
+    const view = viewFor(result);
+    assert.notEqual(view.verification, "independently_verified");
+    assert.equal(view.adapterRouteEligible, false);
+  }
 });
 
 test("synthetic evidence is explicitly labeled and never establishes live verification", () => {
@@ -674,6 +721,20 @@ test("recovery is preserved from the registry and executable does not authorize 
   assert.equal(typeof view.adapterRouteEligible, "boolean");
 });
 
+test("PARTIALLY_IMPLEMENTED aggregate with all CRUD implemented does not promote to IMPLEMENTED_AND_TESTED", () => {
+  // All CRUD ops implemented but aggregate remains PARTIALLY_IMPLEMENTED due to registry constraint; must stay ineligible for adapter route.
+  const result = normalizeCapabilities(
+    registryWith({ aggregateStatus: "PARTIALLY_IMPLEMENTED", allOperationStatus: "IMPLEMENTED_AND_TESTED" }),
+    "squarespace",
+    declaration([descriptor({ support: "supported" })]),
+    options(),
+  );
+  const view = viewFor(result);
+  assert.equal(view.aggregateStatus, "PARTIALLY_IMPLEMENTED");
+  assert.equal(view.adapterRouteEligible, false);
+  assert.ok(view.reasonCodes.includes("trusted_verifier_not_integrated"));
+});
+
 test("every aggregate registry status is reconciled against every descriptor support value", () => {
   const supportValues = ["supported", "unsupported", "not_verified"] as const;
   for (const aggregateStatus of CAPABILITY_STATUSES) {
@@ -758,6 +819,7 @@ test("declaration-set validation rejects unknown CMS, capability, and operation 
   assert.ok(unknownCms.validationErrors.some((error) => error.code === "invalid_declaration_set"));
 });
 
+// --- END PHASE 2B-A TESTS ---
 test("declaration-set conflicts are deterministic regardless of declaration order", () => {
   const first = declaration();
   const second = declaration([descriptor()], { adapterId: "second-adapter" });

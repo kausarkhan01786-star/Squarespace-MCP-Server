@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Focused regression tests for StreamableHttpGateway (Phase 3C.3).
  *
  * Tests:

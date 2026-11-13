@@ -1,4 +1,4 @@
-import { fileURLToPath } from "node:url";
+﻿import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { BrowserOperationLock } from "../browser/browser-operation-lock.js";
 import { BrowserProfileOwnership } from "../browser/browser-profile-ownership.js";
