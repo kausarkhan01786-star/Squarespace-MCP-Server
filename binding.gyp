@@ -9,8 +9,7 @@
           "libraries": [ "Advapi32.lib" ],
           "msvs_settings": {
             "VCCLCompilerTool": {
-              "ExceptionHandling": 0,
-              "CompileAs": "1"
+              "ExceptionHandling": 0
             }
           }
         }]
