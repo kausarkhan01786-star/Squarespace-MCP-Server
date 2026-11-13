@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Node.js (exact version 26.8.1)
-        uses: actions/setup-node@1e60f620b9541d16abce96c5465dc8ee9832be0b # v4.0.3
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "26.8.1"
           architecture: "x64"
@@ -133,7 +133,7 @@ jobs:
 
       - name: Upload development build artifact
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb99ba8afd # v4.6.1
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: windows-native-ownership-x64-node26.8.1
           path: |
