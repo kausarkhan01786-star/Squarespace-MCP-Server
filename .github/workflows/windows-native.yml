@@ -1,0 +1,143 @@
+name: Windows Native Ownership Addon
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & Verify Windows Native Addon (x64 / Node 26.8.1)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js (exact version 26.8.1)
+        uses: actions/setup-node@1e60f620b9541d16abce96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "26.8.1"
+          architecture: "x64"
+
+      - name: Inspect and record build environment
+        shell: powershell
+        run: |
+          Write-Host "=== BUILD ENVIRONMENT METADATA ==="
+          $nodeVer = (node -v).Trim()
+          $nodeArch = (node -p "process.arch").Trim()
+          $commit = (git rev-parse HEAD).Trim()
+          $runnerImage = $env:ImageVersion
+          if (-not $runnerImage) { $runnerImage = "windows-2022" }
+
+          Write-Host "Runner OS / Image: Windows Server 2022 ($runnerImage)"
+          Write-Host "Source Commit: $commit"
+          Write-Host "Node.js Version: $nodeVer"
+          Write-Host "Node Architecture: $nodeArch"
+
+          # Assert exact Node version and architecture
+          if ($nodeVer -ne "v26.8.1") {
+            Write-Error "Node.js version mismatch: expected v26.8.1, got $nodeVer"
+            exit 1
+          }
+          if ($nodeArch -ne "x64") {
+            Write-Error "Architecture mismatch: expected x64, got $nodeArch"
+            exit 1
+          }
+
+          # Query and record MSVC version
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            Write-Host "Visual Studio Installation: $vsPath"
+            $toolsVersionFile = Join-Path $vsPath "VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt"
+            if (Test-Path $toolsVersionFile) {
+              $msvcVer = (Get-Content $toolsVersionFile).Trim()
+              Write-Host "MSVC Version: $msvcVer"
+              echo "MSVC_VERSION=$msvcVer" >> $env:GITHUB_ENV
+            }
+          }
+
+          # Record Windows SDK
+          $sdkKey = "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots"
+          if (Test-Path $sdkKey) {
+            $sdkRoots = Get-ItemProperty -Path $sdkKey -ErrorAction SilentlyContinue
+            Write-Host "Windows SDK KitsRoot: $($sdkRoots.KitsRoot10)"
+          }
+          echo "RUNNER_IMAGE_VERSION=$runnerImage" >> $env:GITHUB_ENV
+          Write-Host "=================================="
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: TypeScript build
+        run: npm run build
+
+      - name: Build Windows native single-instance ownership addon
+        run: npm run build:native
+
+      - name: Verify native binary exists and is x64 PE
+        shell: powershell
+        run: |
+          $binPath = "build\Release\instance_ownership.node"
+          if (-not (Test-Path $binPath)) {
+            Write-Error "Addon binary was not generated at $binPath"
+            exit 1
+          }
+
+          # Verify PE header machine type is AMD64 (0x8664)
+          $bytes = [System.IO.File]::ReadAllBytes($binPath)
+          $e_lfanew = [System.BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [System.BitConverter]::ToUInt16($bytes, $e_lfanew + 4)
+          Write-Host "PE Machine Type Header: 0x$($machine.ToString('X4'))"
+          if ($machine -ne 0x8664) {
+            Write-Error "Binary architecture mismatch: expected 0x8664 (x64), got 0x$($machine.ToString('X4'))"
+            exit 1
+          }
+          Write-Host "SUCCESS: instance_ownership.node is valid x64 Windows PE binary."
+
+      - name: Load native addon and assert Node-API version
+        shell: powershell
+        run: |
+          node -e "
+            const { loadNativeAddon } = require('./dist/instance-ownership/native-instance-ownership.js');
+            const addon = loadNativeAddon();
+            const info = addon.getNativeInfo();
+            console.log('Loaded native addon info:', JSON.stringify(info));
+            if (info.platform !== 'win32') throw new Error('Platform is not win32');
+            if (info.arch !== 'x64') throw new Error('Architecture is not x64');
+            if (info.nodeApiVersion !== 8) throw new Error('Node-API version is not 8');
+          "
+
+      - name: Run service lifecycle and native ownership integration tests
+        run: npx tsx --test src/instance-ownership/service-lifecycle.test.ts src/instance-ownership/windows-native-ownership.integration.test.ts src/http/gateway-security.test.ts src/http/streamable-http-gateway.test.ts src/service/main-entrypoint.test.ts
+
+      - name: Run repository full test suite
+        run: npm test
+
+      - name: Generate development artifact manifest
+        run: node scripts/generate-manifest.mjs
+
+      - name: Validate artifact manifest and digest
+        run: node scripts/validate-manifest.mjs
+
+      - name: Upload development build artifact
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb99ba8afd # v4.6.1
+        with:
+          name: windows-native-ownership-x64-node26.8.1
+          path: |
+            build/Release/instance_ownership.node
+            build/Release/build-manifest.json
+          if-no-files-found: error
+          retention-days: 7
